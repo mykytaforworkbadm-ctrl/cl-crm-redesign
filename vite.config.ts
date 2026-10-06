@@ -5,7 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-    base: '/CRM-re-design-/', // Важно: имя текущего репозитория
+    base: '/cl-crm-redesign/', // Указано точное имя репозитория GitHub
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
