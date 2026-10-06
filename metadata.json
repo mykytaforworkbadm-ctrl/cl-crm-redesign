@@ -1,0 +1,6 @@
+{
+  "name": "Сторінка блокування автообробки",
+  "description": "Система блокування автообробки та моніторингу черги замовлень клієнтів",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
