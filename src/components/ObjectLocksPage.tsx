@@ -190,7 +190,7 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
         </div>
         <div className="text-center" style={{ flex: 1 }}>
           <h2 style={{ fontFamily: 'fantasy', margin: '0 0 4px 0' }}>
-            Реєстр блокувань об'єктів (Маршрути, РСП, Склади, Об'єднання)
+            Реєстр блокувань об'єктів (Маршрути, РСП, Склади, Об'єднання, Корпорації)
           </h2>
         </div>
         <div style={{ minWidth: onNavigateBack ? 280 : 0 }}></div>
@@ -224,6 +224,7 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
             <option value="РСП">РСП</option>
             <option value="Склад">Склади</option>
             <option value="Об'єднання">Об'єднання</option>
+            <option value="Корпорація">Корпорації</option>
           </select>
 
           <div style={{ fontWeight: 'bold' }}>Статус:</div>
@@ -444,6 +445,8 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
                                   ? '#269abc'
                                   : lock.targetType === 'Склад'
                                   ? '#8a6d3b'
+                                  : lock.targetType === 'Корпорація'
+                                  ? '#6f42c1'
                                   : '#a94442'
                             }}
                           >
@@ -486,7 +489,10 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
                             </span>
                           )}
                         </td>
-                        <td>{lock.reason}</td>
+                        <td>
+                          {lock.reason}
+                          {lock.groupName && <span style={{ color: '#6f42c1', fontSize: 11 }}> · група «{lock.groupName}»</span>}
+                        </td>
                         <td>{lock.lockDate}</td>
                         <td>{lock.lockedBy}</td>
                         <td>

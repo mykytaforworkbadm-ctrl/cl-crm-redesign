@@ -250,6 +250,9 @@ export const UnlockedQueueOrdersPage: React.FC<UnlockedQueueOrdersPageProps> = (
           <div style={{ fontSize: '12px', color: '#666' }}>
             Реєстр замовлень, які вийшли з буфера після зняття блокування з клієнта та проходять повторне автоопрацювання (тільки для перегляду)
           </div>
+          <div id="unlocked_proto_note" style={{ fontSize: '11px', color: '#8a6d3b', marginTop: 2 }}>
+            У прототипі: після зняття блокування замовлення клієнта з буфера з'являються вгорі реєстру; статус змінюється на щохвилинній перевірці (імітація джоби перезапуску).
+          </div>
         </div>
         <div style={{ minWidth: onNavigateBack ? 280 : 0 }}></div>
       </div>
@@ -332,10 +335,14 @@ export const UnlockedQueueOrdersPage: React.FC<UnlockedQueueOrdersPageProps> = (
                 }}
               >
                 <option value="all">Всі причини блокування</option>
-                <option value="Блокування НКЦ">Блокування НКЦ</option>
-                <option value="Частковий кредитний ліміт">Частковий кредитний ліміт</option>
-                <option value="Дебіторська заборгованість">Дебіторська заборгованість</option>
-                <option value="Кредитний ліміт">Кредитний ліміт</option>
+                {/* п. 7: перелік причин — з наявних записів (у т.ч. ручні причини блокувань об'єктів) */}
+                {Array.from(new Set<string>(orders.map((o) => String(o.lockReason)).filter(Boolean)))
+                  .sort((a, b) => a.localeCompare(b, 'uk'))
+                  .map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
               </select>
             </div>
           </div>

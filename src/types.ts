@@ -6,6 +6,7 @@ export interface LockDetail {
   startDate?: string;
   endDate?: string;
   isScheduled?: boolean;
+  groupName?: string; // Р1: блокування встановлене на групу об'єктів
 }
 
 export interface ClientRecord {
@@ -68,7 +69,8 @@ export interface QueueOrder {
   corpName?: string;
 }
 
-export type EntityType = 'Маршрут' | 'РСП' | 'Склад' | 'Об\'єднання';
+// Р3: корпорація — об'єкт блокування того самого роду, що й об'єднання («це одна сутність», коментар бізнесу 05.10)
+export type EntityType = 'Маршрут' | 'РСП' | 'Склад' | 'Об\'єднання' | 'Корпорація';
 
 export interface ObjectLockRecord {
   id: string;
@@ -81,6 +83,7 @@ export interface ObjectLockRecord {
   startDate?: string;
   endDate?: string;
   isScheduled?: boolean;
+  groupName?: string; // Р1: блокування встановлене на групу об'єктів
 }
 
 export type AppPage = 'registry' | 'buffer' | 'objects' | 'unlocked-queue' | 'client';
@@ -138,6 +141,7 @@ export interface EntityRegistryRow {
   editDate: string;
   editUser: string;
   reason: string;
+  groupName?: string; // Р1: блокування встановлене на групу
   countOrders: string | number;
   sumOrders: string;
   countRows: string | number;
@@ -196,4 +200,30 @@ export interface QueueColumnFilters {
   urgentazh: string;
   orderCountRows: string;
   ignored?: string;
+}
+
+// Р4: запис історії блокування рядка (як вікно «Історія» в поточному додатку: Дія, Дата, Поле, Старе / Нове значення)
+export interface HistoryEntry {
+  action: string; // «Обновление» — зміна користувачем; «Планувальник» — автоматичне вмикання / вимикання за розкладом
+  date: string; // дд.мм.рррр, гг:хх:сс
+  field: string; // VALUE, BLOCKING_REASON, EDIT_DATE, BLOCK_DATE_FROM, BLOCK_DATE_TO
+  oldValue: string;
+  newValue: string;
+}
+
+// Р1 (коментар бізнесу 05.10, п. 1.a–1.c, 2): група об'єктів одного типу — імпортований список (назва = ім'я файлу)
+export type GroupKind = 'clients' | 'routes' | 'rsps' | 'depts';
+
+export interface ObjectGroup {
+  id: string;
+  name: string;
+  kind: GroupKind;
+  memberIds: number[];
+  createdAt: string; // дд.мм.рррр гг:хх
+  editedAt: string;
+  editedBy: string;
+  lastAction?: 'lock' | 'unlock';
+  reason?: string;
+  lockFrom?: string; // дд.мм.рррр гг:хх — початок блокування групи (або момент негайного блокування)
+  lockTo?: string;
 }

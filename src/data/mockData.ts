@@ -126,6 +126,12 @@ export const ROUTES_DATA = [
   // Ф2: маршрути клієнтів з тестових даних, яких не було в довіднику
   { value: 1299, label: 'BT_KI_01' },
   { value: 1300, label: 'BT_KI_02' },
+  // п. 7: решта маршрутів клієнтів з тестових даних (щоб їх можна було заблокувати і перевірити реєстр розблокування)
+  { value: 1267, label: 'BT_VI_02' },
+  { value: 1275, label: 'BT_OD_02' },
+  { value: 1303, label: 'BT_RV_02' },
+  { value: 1398, label: 'BT_RV_01' },
+  { value: 1312, label: 'BT_NK_01' },
   { value: 1540, label: 'BT_DN_OOY' },
   { value: 1306, label: 'BT_DN_U02' },
   { value: 1307, label: 'BT_DN_U03' },

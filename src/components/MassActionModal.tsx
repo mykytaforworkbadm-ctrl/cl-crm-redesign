@@ -1,16 +1,20 @@
 import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
 import { DateTimeInput } from './DateTimeInput';
-import { ClientRecord, ObjectLockRecord } from '../types';
+import { ClientRecord, ObjectLockRecord, ObjectGroup, GroupKind } from '../types';
+import { GroupsManager, CatalogItem, MemberState, isGroupEditable } from './GroupsManager';
 import { UNIONS_DATA, DEPTS_DATA, RSPS_DATA, ROUTES_DATA, CORPORATIONS_DATA, MANUAL_BLOCKING_REASONS } from '../data/mockData';
-import { computeLockTimingState, formatToDisplayDateTime } from '../utils/lockTiming';
+import { computeLockTimingState, formatToDisplayDateTime, isShownAsBlocked } from '../utils/lockTiming';
 import { readXlsxCodes } from '../utils/readXlsxCodes';
+import { getFutureLockDetail } from './ClientsTable';
 
 interface MassActionModalProps {
   isOpen: boolean;
   onClose: () => void;
   clients: ClientRecord[];
   objectLocks?: ObjectLockRecord[];
+  groups?: ObjectGroup[]; // Р1
+  onGroupsChange?: (groups: ObjectGroup[]) => void;
   onApplyMassAction: (
     entityType: 'clients' | 'routes' | 'rsps' | 'depts',
     selectedIds: (number | string)[],
@@ -19,7 +23,8 @@ interface MassActionModalProps {
     startDateTime?: string,
     endDateTime?: string,
     totalSelectedCount?: number,
-    conflictCount?: number
+    conflictCount?: number,
+    groupName?: string
   ) => void;
 }
 
@@ -37,9 +42,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   onClose,
   clients,
   objectLocks = [],
+  groups = [],
+  onGroupsChange,
   onApplyMassAction
 }) => {
   const [activeTab, setActiveTab] = useState<'clients' | 'routes' | 'rsps' | 'depts'>('clients');
+  // Р1: фільтр «Група» у кожній вкладці, вікно управління групами, імпорт у конкретну групу («Оновити з файлу»)
+  const [groupFilter, setGroupFilter] = useState<Record<GroupKind, string>>({ clients: '', routes: '', rsps: '', depts: '' });
+  const [showGroupsManager, setShowGroupsManager] = useState(false);
+  const [importTargetGroupId, setImportTargetGroupId] = useState<string | null>(null);
   // В5: ширина колонок у списках вкладок регулюється перетягуванням межі заголовка (як у реєстрах)
   const clientsGridRef = useGridColumns();
   const routesGridRef = useGridColumns();
@@ -166,13 +177,44 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
         setDeptSearch('');
       }
 
+      // Р1: імпортований список стає групою (назва = ім'я файлу без розширення); «Оновити з файлу» — замінює склад обраної групи
+      let groupNote = '';
+      if (foundIds.length > 0) {
+        const stamp = nowStamp();
+        const target = importTargetGroupId ? groups.find((g) => g.id === importTargetGroupId) : null;
+        const baseName = importFile.name.replace(/\.xlsx$/i, '').trim() || 'Група';
+        const sameName = groups.find((g) => g.kind === activeTab && g.name.toLowerCase() === baseName.toLowerCase());
+        const existing = target || sameName || null;
+        if (existing && !isGroupEditable(existing)) {
+          groupNote = `Склад групи «${existing.name}» не змінено: блокування групи вже почалось.`;
+        } else if (existing) {
+          applyComposition(existing, foundIds); // для запланованої групи — додає / знімає заплановані блокування
+          setGroupFilter({ ...groupFilter, [activeTab]: existing.id });
+          groupNote = `Групу «${existing.name}» оновлено: ${foundIds.length} об'єктів.`;
+        } else {
+          const created: ObjectGroup = {
+            id: `grp-${Date.now()}`,
+            name: baseName,
+            kind: activeTab,
+            memberIds: foundIds,
+            createdAt: stamp,
+            editedAt: stamp,
+            editedBy: CURRENT_USER
+          };
+          updateGroups([...groups, created]);
+          setGroupFilter({ ...groupFilter, [activeTab]: created.id });
+          groupNote = `Створено групу «${created.name}»: ${foundIds.length} об'єктів (фільтр «Група» увімкнено).`;
+        }
+      }
+
       const parts = [
         `Файл «${importFile.name}»: рядків з кодами — ${rows.length}.`,
         `Знайдено і виділено ${tabLabel}: ${foundIds.length}.`,
         notFound.length > 0 ? `Не знайдено: ${notFound.length}.` : 'Усі коди з файлу знайдено.',
         duplicates > 0 ? `Повторів у файлі: ${duplicates}.` : '',
         skippedHeader ? `Перший рядок «${skippedHeader}» пропущено як заголовок.` : '',
-        'Попередній вибір у вкладці замінено об\'єктами з файлу.'
+        'Попередній вибір у вкладці замінено об\'єктами з файлу.',
+        groupNote
       ].filter(Boolean);
       setImportResult({ kind: foundIds.length > 0 ? 'ok' : 'error', text: parts.join(' '), notFound });
     } catch (err) {
@@ -183,6 +225,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   };
 
   const closeImportModal = () => {
+    setImportTargetGroupId(null);
     setShowImportModal(false);
     setImportResult(null);
     setImportFile(null);
@@ -190,8 +233,140 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
 
   if (!isOpen) return null;
 
+  // ---------- Р1: групи ----------
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const nowStamp = () => {
+    const d = new Date();
+    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  };
+  const CURRENT_USER = 'Дубінін Микита Валерійович';
+  const targetTypeOf = (kind: GroupKind) => (kind === 'routes' ? 'Маршрут' : kind === 'rsps' ? 'РСП' : 'Склад');
+  const kindLabelOf = (kind: GroupKind) =>
+    kind === 'clients' ? 'Клієнти' : kind === 'routes' ? 'Маршрути' : kind === 'rsps' ? 'РСП' : 'Склади';
+
+  const catalogFor = (kind: GroupKind): CatalogItem[] =>
+    kind === 'clients'
+      ? clients.map((c) => ({ id: c.id, code: c.clCode, name: c.clName }))
+      : kind === 'routes'
+      ? ROUTES_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, code: r.label, name: r.label }))
+      : kind === 'rsps'
+      ? RSPS_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, code: (r as { code?: string }).code || String(r.value), name: r.label }))
+      : DEPTS_DATA.filter((d) => d.value !== 0).map((d) => ({ id: d.value, code: (d as { code?: string }).code || String(d.value), name: d.label }));
+
+  // Стан блокування об'єкта (для колонок і статусу групи): власне блокування клієнта / блокування об'єкта
+  const lockOf = (kind: GroupKind, id: number) => {
+    if (kind === 'clients') {
+      const c = clients.find((x) => x.id === id);
+      const own = c?.lockDetails?.find((d) => d.source === 'Клієнт');
+      return own
+        ? { startDate: own.startDate, endDate: own.endDate, isScheduled: own.isScheduled, lockDate: c?.editDate || '', lockedBy: c?.editUser || '', reason: own.reason }
+        : null;
+    }
+    const l = objectLocks.find((x) => x.targetType === targetTypeOf(kind) && x.targetCode === String(id));
+    return l ? { startDate: l.startDate, endDate: l.endDate, isScheduled: l.isScheduled, lockDate: l.lockDate, lockedBy: l.lockedBy, reason: l.reason } : null;
+  };
+  const memberStateFor = (kind: GroupKind) => (id: number): MemberState => {
+    const l = lockOf(kind, id);
+    if (!l) return { status: 'none' };
+    const t = computeLockTimingState(l, new Date());
+    return { status: t.isExpired ? 'none' : t.isFuture ? 'future' : 'active' };
+  };
+  const groupsOf = (kind: GroupKind) => groups.filter((g) => g.kind === kind);
+  const groupNamesOf = (kind: GroupKind, id: number) =>
+    groupsOf(kind)
+      .filter((g) => g.memberIds.includes(id))
+      .map((g) => g.name)
+      .join(', ');
+  const activeGroup = groups.find((g) => g.id === groupFilter[activeTab] && g.kind === activeTab) || null;
+  const inActiveGroup = (id: number) => !activeGroup || activeGroup.memberIds.includes(id);
+  const updateGroups = (next: ObjectGroup[]) => onGroupsChange && onGroupsChange(next);
+
+  // Зміна складу групи (вікно «Склад групи» або «Оновити з файлу» / повторний імпорт файлу з тією ж назвою).
+  // Заплановане блокування групи ще не почалось: додані отримують його, прибрані — втрачають (тільки блокування цієї групи)
+  const applyComposition = (g: ObjectGroup, memberIds: number[]) => {
+    const added = memberIds.filter((id) => !g.memberIds.includes(id));
+    const removed = g.memberIds.filter((id) => !memberIds.includes(id));
+    updateGroups(groups.map((x) => (x.id === g.id ? { ...x, memberIds, editedAt: nowStamp(), editedBy: CURRENT_USER } : x)));
+    if (g.lastAction === 'lock' && isGroupEditable(g)) {
+      if (added.length) onApplyMassAction(g.kind, added, 'lock', g.reason || 'Блокування НКЦ', g.lockFrom, g.lockTo || undefined, added.length, 0, g.name);
+      const removedOwn = removed.filter((id) => {
+        if (g.kind === 'clients') {
+          const c = clients.find((x) => x.id === id);
+          return Boolean(c?.lockDetails?.some((d) => d.source === 'Клієнт' && d.groupName === g.name));
+        }
+        return objectLocks.some((l) => l.targetType === targetTypeOf(g.kind) && l.targetCode === String(id) && l.groupName === g.name);
+      });
+      if (removedOwn.length) onApplyMassAction(g.kind, removedOwn, 'unlock', '', undefined, undefined, removedOwn.length, 0, g.name);
+    }
+  };
+
+  // Колонки стану в списках вкладок (Р1: група, статус блоку, початок / кінець, дата змін, хто змінив)
+  const stateCells = (kind: GroupKind, id: number, withStatus: boolean) => {
+    const l = lockOf(kind, id);
+    const t = l ? computeLockTimingState(l, new Date()) : null;
+    const live = l && t && !t.isExpired ? l : null;
+    return (
+      <>
+        <td style={{ fontSize: 12, color: '#6f42c1' }}>{groupNamesOf(kind, id) || '—'}</td>
+        {withStatus && (
+          <td style={{ textAlign: 'center' }}>
+            {live && t && t.isBlocked ? (
+              <span style={{ color: '#ac2925', fontWeight: 'bold' }}>Так{t.isScheduled ? ' ⏱' : ''}</span>
+            ) : (
+              <span style={{ color: '#3e8f3e' }}>Ні{live && t?.isFuture ? ' ⏱' : ''}</span>
+            )}
+          </td>
+        )}
+        <td style={{ fontSize: 12 }}>{live ? formatToDisplayDateTime(live.startDate) || '—' : '—'}</td>
+        <td style={{ fontSize: 12 }}>{live ? formatToDisplayDateTime(live.endDate) || (live.startDate ? 'безстроково' : '—') : '—'}</td>
+        <td style={{ fontSize: 12 }}>{live ? live.lockDate : '—'}</td>
+        <td style={{ fontSize: 12 }}>{live ? live.lockedBy : '—'}</td>
+      </>
+    );
+  };
+  const stateHeaders = (withStatus: boolean) => (
+    <>
+      <th style={{ width: 130 }}>Група</th>
+      {withStatus && <th style={{ width: 70, textAlign: 'center' }}>Блок</th>}
+      <th style={{ width: 120 }}>Початок</th>
+      <th style={{ width: 120 }}>Кінець</th>
+      <th style={{ width: 130 }}>Дата змін</th>
+      <th style={{ width: 150 }}>Змінив</th>
+    </>
+  );
+
+  // Фільтр «Група» і кнопка «Групи» в панелі вкладки
+  const groupControls = (
+    <>
+      <select
+        className="form-control"
+        style={{ flex: 0.9 }}
+        value={groupFilter[activeTab]}
+        onChange={(e) => setGroupFilter({ ...groupFilter, [activeTab]: e.target.value })}
+        title="Фільтр по групі (імпортованому списку)"
+      >
+        <option value="">Усі (без фільтра групи)</option>
+        {groupsOf(activeTab).map((g) => (
+          <option key={g.id} value={g.id}>
+            Група: {g.name} ({g.memberIds.length})
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        className="btn btn-default btn-sm"
+        style={{ whiteSpace: 'nowrap', height: 34 }}
+        onClick={() => setShowGroupsManager(true)}
+        title="Групи вкладки: склад, експорт, оновлення з файлу, видалення"
+      >
+        Групи ({groupsOf(activeTab).length})
+      </button>
+    </>
+  );
+
   // Filtered lists
   const filteredClients = clients.filter((c) => {
+    if (!inActiveGroup(c.id)) return false;
     if (clientUnionFilter > 0 && c.unionId !== clientUnionFilter) return false;
     if (clientCorpFilter !== 'all') {
       if (c.corpCode !== clientCorpFilter && c.corpName !== clientCorpFilter) return false;
@@ -209,9 +384,9 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
     return true;
   });
 
-  const filteredRoutes = ROUTES_DATA.filter((r) => r.value !== 0 && (!routeSearch || r.label.toLowerCase().includes(routeSearch.toLowerCase())));
-  const filteredRsps = RSPS_DATA.filter((r) => r.value !== 0 && (!rspSearch || r.label.toLowerCase().includes(rspSearch.toLowerCase())));
-  const filteredDepts = DEPTS_DATA.filter((d) => d.value !== 0 && (!deptSearch || d.label.toLowerCase().includes(deptSearch.toLowerCase())));
+  const filteredRoutes = ROUTES_DATA.filter((r) => r.value !== 0 && inActiveGroup(r.value) && (!routeSearch || r.label.toLowerCase().includes(routeSearch.toLowerCase())));
+  const filteredRsps = RSPS_DATA.filter((r) => r.value !== 0 && inActiveGroup(r.value) && (!rspSearch || r.label.toLowerCase().includes(rspSearch.toLowerCase())));
+  const filteredDepts = DEPTS_DATA.filter((d) => d.value !== 0 && inActiveGroup(d.value) && (!deptSearch || d.label.toLowerCase().includes(deptSearch.toLowerCase())));
 
   // Toggle selection
   const handleToggleSelectAll = () => {
@@ -437,6 +612,28 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   };
 
   const handleConfirmAction = () => {
+    // Р1: якщо увімкнено фільтр «Група» і всі об'єкти дії входять у цю групу — дія виконується над групою:
+    // блокування позначаються назвою групи, у групі фіксуються статус, період, дата змін і хто змінив
+    const grp = groups.find((g) => g.id === groupFilter[activeTab] && g.kind === activeTab) || null;
+    const asGroup = Boolean(grp && nonConflictedIds.length > 0 && nonConflictedIds.every((id) => grp.memberIds.includes(Number(id))));
+    if (grp && asGroup) {
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const d = new Date();
+      const stamp = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      const updated: ObjectGroup =
+        pendingAction === 'lock'
+          ? {
+              ...grp,
+              lastAction: 'lock',
+              reason,
+              lockFrom: formatToDisplayDateTime(startDateTime) || stamp,
+              lockTo: formatToDisplayDateTime(endDateTime) || '',
+              editedAt: stamp,
+              editedBy: 'Дубінін Микита Валерійович'
+            }
+          : { ...grp, lastAction: 'unlock', lockFrom: undefined, lockTo: undefined, editedAt: stamp, editedBy: 'Дубінін Микита Валерійович' };
+      if (onGroupsChange) onGroupsChange(groups.map((g) => (g.id === grp.id ? updated : g)));
+    }
     // When confirming, apply action to nonConflictedIds
     onApplyMassAction(
       activeTab,
@@ -446,7 +643,8 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       startDateTime,
       endDateTime,
       getSelectedCount(),
-      conflictedItems.length
+      conflictedItems.length,
+      grp && asGroup ? grp.name : undefined
     );
     setShowConfirmModal(false);
     onClose();
@@ -576,11 +774,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                         <option key={c.value} value={c.value}>{c.label}</option>
                       ))}
                     </select>
+                    {groupControls}
                     <button
                       type="button"
                       className="btn btn-default btn-sm"
                       style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, height: 34 }}
-                      onClick={() => setShowImportModal(true)}
+                      onClick={() => {
+                        setImportTargetGroupId(null);
+                        setShowImportModal(true);
+                      }}
                       title="Імпорт списку кодів з файлу (.xlsx)"
                     >
                       <span className="glyphicon glyphicon-open"></span> Імпорт із файлу
@@ -603,6 +805,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                           <th style={{ width: 140 }}>Об'єднання</th>
                           <th style={{ width: 150 }}>Корпорація</th>
                           <th style={{ width: 75, textAlign: 'center' }}>Статус</th>
+                          {stateHeaders(false)}
                         </tr>
                       </thead>
                       <tbody>
@@ -632,12 +835,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                               <td>{client.unionName || '—'}</td>
                               <td>{client.corpName || '—'}</td>
                               <td style={{ textAlign: 'center' }}>
-                                {client.isBlocked ? (
-                                  <span style={{ color: '#ac2925', fontWeight: 'bold' }}>Блок</span>
+                                {isShownAsBlocked(client.isBlocked, Boolean(getFutureLockDetail(client))) ? (
+                                  <span style={{ color: '#ac2925', fontWeight: 'bold' }}>
+                                    Блок{!client.isBlocked && ' ⏱'}
+                                  </span>
                                 ) : (
                                   <span style={{ color: '#3e8f3e' }}>Активний</span>
                                 )}
                               </td>
+                              {stateCells('clients', client.id, false)}
                             </tr>
                           );
                         })}
@@ -659,11 +865,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                       value={routeSearch}
                       onChange={(e) => setRouteSearch(e.target.value)}
                     />
+                    {groupControls}
                     <button
                       type="button"
                       className="btn btn-default btn-sm"
                       style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, height: 34 }}
-                      onClick={() => setShowImportModal(true)}
+                      onClick={() => {
+                        setImportTargetGroupId(null);
+                        setShowImportModal(true);
+                      }}
                       title="Імпорт списку маршрутів з файлу"
                     >
                       <span className="glyphicon glyphicon-open"></span> Імпорт із файлу
@@ -681,6 +891,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                             />
                           </th>
                           <th>Назва маршруту</th>
+                          {stateHeaders(true)}
                         </tr>
                       </thead>
                       <tbody>
@@ -706,6 +917,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                                 />
                               </td>
                               <td>{r.label}</td>
+                              {stateCells('routes', r.value, true)}
                             </tr>
                           );
                         })}
@@ -727,11 +939,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                       value={rspSearch}
                       onChange={(e) => setRspSearch(e.target.value)}
                     />
+                    {groupControls}
                     <button
                       type="button"
                       className="btn btn-default btn-sm"
                       style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, height: 34 }}
-                      onClick={() => setShowImportModal(true)}
+                      onClick={() => {
+                        setImportTargetGroupId(null);
+                        setShowImportModal(true);
+                      }}
                       title="Імпорт списку РСП з файлу"
                     >
                       <span className="glyphicon glyphicon-open"></span> Імпорт із файлу
@@ -749,6 +965,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                             />
                           </th>
                           <th>Назва РСП</th>
+                          {stateHeaders(true)}
                         </tr>
                       </thead>
                       <tbody>
@@ -774,6 +991,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                                 />
                               </td>
                               <td>{rsp.label}</td>
+                              {stateCells('rsps', rsp.value, true)}
                             </tr>
                           );
                         })}
@@ -795,11 +1013,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                       value={deptSearch}
                       onChange={(e) => setDeptSearch(e.target.value)}
                     />
+                    {groupControls}
                     <button
                       type="button"
                       className="btn btn-default btn-sm"
                       style={{ whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, height: 34 }}
-                      onClick={() => setShowImportModal(true)}
+                      onClick={() => {
+                        setImportTargetGroupId(null);
+                        setShowImportModal(true);
+                      }}
                       title="Імпорт списку складів з файлу"
                     >
                       <span className="glyphicon glyphicon-open"></span> Імпорт із файлу
@@ -817,6 +1039,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                             />
                           </th>
                           <th>Назва складу</th>
+                          {stateHeaders(true)}
                         </tr>
                       </thead>
                       <tbody>
@@ -842,6 +1065,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                                 />
                               </td>
                               <td>{d.label}</td>
+                              {stateCells('depts', d.value, true)}
                             </tr>
                           );
                         })}
@@ -969,6 +1193,38 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       </div>
       <div className="modal-backdrop fade in" style={{ zIndex: 1050 }}></div>
 
+      {/* Р1: управління групами вкладки */}
+      {showGroupsManager && (
+        <GroupsManager
+          kind={activeTab}
+          kindLabel={kindLabelOf(activeTab)}
+          groups={groupsOf(activeTab)}
+          catalog={catalogFor(activeTab)}
+          memberState={memberStateFor(activeTab)}
+          onClose={() => setShowGroupsManager(false)}
+          onSelectGroup={(g) => {
+            setGroupFilter({ ...groupFilter, [g.kind]: g.id });
+            if (g.kind === 'clients') setSelectedClientIds(g.memberIds);
+            else if (g.kind === 'routes') setSelectedRouteIds(g.memberIds);
+            else if (g.kind === 'rsps') setSelectedRspIds(g.memberIds);
+            else setSelectedDeptIds(g.memberIds);
+            setShowGroupsManager(false);
+          }}
+          onReimport={(g) => {
+            setImportTargetGroupId(g.id);
+            setShowGroupsManager(false);
+            setShowImportModal(true);
+          }}
+          onDelete={(g) => {
+            updateGroups(groups.filter((x) => x.id !== g.id));
+            if (groupFilter[g.kind] === g.id) setGroupFilter({ ...groupFilter, [g.kind]: '' });
+          }}
+          onSaveComposition={(g, memberIds) => {
+            applyComposition(g, memberIds);
+          }}
+        />
+      )}
+
       {/* Modal: Import from file (Requirement 2.7 - UI only) */}
       {showImportModal && (
         <>
@@ -989,7 +1245,9 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                 </div>
                 <div className="modal-body" style={{ padding: 15 }}>
                   <p style={{ fontSize: 13, color: '#333', marginBottom: 12 }}>
-                    Оберіть файл Excel (.xlsx) зі списком кодів для автоматичного виділення об'єктів у поточній вкладці:
+                    {importTargetGroupId
+                      ? `Оновлення складу групи «${groups.find((g) => g.id === importTargetGroupId)?.name || ''}»: оберіть файл Excel (.xlsx) з новим списком.`
+                      : "Оберіть файл Excel (.xlsx) зі списком кодів. Об'єкти з файлу будуть виділені і збережені як група з назвою файлу."}
                   </p>
                   <div className="form-group" style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 12, fontWeight: 'bold' }}>Файл для імпорту (.xlsx):</label>

@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
 import { ClientRecord, ColumnFilters } from '../types';
-import { computeLockTimingState, formatClockTooltip, formatToDisplayDateTime, parseDateStringToMs } from '../utils/lockTiming';
+import { computeLockTimingState, formatClockTooltip, formatToDisplayDateTime, isShownAsBlocked, parseDateStringToMs } from '../utils/lockTiming';
 
 interface ClientsTableProps {
   clients: ClientRecord[];
   selectedClientId: number | null;
   onSelectClient: (client: ClientRecord) => void;
   onOpenChangeLock: (client: ClientRecord) => void;
+  onOpenHistory?: (client: ClientRecord) => void; // Р4: «+» відкриває вікно «Історія»
   onDrilldownBuffer?: (client: ClientRecord, showIgnoredOnly?: boolean) => void;
   columnFilters: ColumnFilters;
   onColumnFilterChange: (filters: ColumnFilters) => void;
@@ -48,6 +49,7 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
   selectedClientId,
   onSelectClient,
   onOpenChangeLock,
+  onOpenHistory,
   onDrilldownBuffer,
   columnFilters,
   onColumnFilterChange,
@@ -134,7 +136,8 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
     }
     if (columnFilters.block && columnFilters.block !== '') {
       const isBlockedExpected = columnFilters.block === '1';
-      if (c.isBlocked !== isBlockedExpected) return false;
+      // фільтр колонки «Блок» — за тим значенням, яке видно в колонці
+      if (isShownAsBlocked(c.isBlocked, Boolean(getFutureLockDetail(c))) !== isBlockedExpected) return false;
     }
     if (columnFilters.clCode && !c.clCode.toLowerCase().includes(columnFilters.clCode.toLowerCase())) return false;
     if (columnFilters.clName && !c.clName.toLowerCase().includes(columnFilters.clName.toLowerCase())) return false;
@@ -800,7 +803,15 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
                       onClick={() => onSelectClient(client)}
                       style={{ cursor: 'pointer' }}
                     >
-                      <td style={{ width: '31px', textAlign: 'center' }} className="ui-sgcollapsed sgcollapsed">
+                      <td
+                        style={{ width: '31px', textAlign: 'center', cursor: 'pointer', fontWeight: 'bold', color: '#337ab7' }}
+                        className="ui-sgcollapsed sgcollapsed"
+                        title="Історія блокування"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onOpenHistory) onOpenHistory(client);
+                        }}
+                      >
                         +
                       </td>
                       <td style={{ width: '68px', textAlign: 'center' }}>
@@ -818,7 +829,7 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
                       </td>
                       <td style={{ width: '60px', textAlign: 'center', verticalAlign: 'middle' }}>
                         <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-                          {client.isBlocked ? (
+                          {isShownAsBlocked(client.isBlocked, Boolean(getFutureLockDetail(client))) ? (
                             <span
                               style={{
                                 padding: '2px 6px',
@@ -918,11 +929,13 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
                                       : '#777'
                                 }}
                               >
-                                [{detail.source}]
+                                [{detail.source}
+                                {detail.groupName ? ` · група «${detail.groupName}»` : ''}]
                               </span>{' '}
                               <span>{detail.reason}</span>
-                              {detail.isScheduled && (
-                                <span style={{ color: '#a06000', fontSize: 10 }}> (⏱ {formatToDisplayDateTime(detail.startDate).split(' ')[1] || formatToDisplayDateTime(detail.startDate)})</span>
+                              {/* рішення 06.10 (Линник А. Т.): майбутнє блокування видно в «Причині» одразу; діюче — без позначки */}
+                              {detail.startDate && computeLockTimingState(detail).isFuture && (
+                                <span style={{ color: '#a06000', fontSize: 10 }}> (⏱ з {formatToDisplayDateTime(detail.startDate)})</span>
                               )}
                             </div>
                           ))
@@ -1024,6 +1037,12 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
                                 </span>
                               );
                             })()}
+                            {/* Р1 (п. 3.b): ознака «група», якщо блокування заплановане на групу */}
+                            {getFutureLockDetail(client)?.groupName && (
+                              <div style={{ fontSize: 10, color: '#6f42c1', marginTop: 2 }}>
+                                група «{getFutureLockDetail(client)?.groupName}»
+                              </div>
+                            )}
                           </td>
                         </>
                       )}

@@ -134,6 +134,18 @@ export function formatClockTooltip(
   return `${prefix} за розкладом`;
 }
 
+/**
+ * Відображення запланованого (ще не діючого) блокування в колонці «Блок».
+ * false (погоджено 06.10, як просить бізнес у п. 3): до початку періоду «Ні» + ⏱, «Так» — тільки в межах періоду.
+ * Майбутнє блокування об'єкта показується в колонці «Причина» одразу, з ⏱ і часом початку (рішення з Линник А. Т.).
+ * true — альтернатива, що обговорювалась: «Так» + ⏱ одразу після планування.
+ */
+export const SHOW_SCHEDULED_AS_BLOCKED = false;
+
+/** Значення колонки «Блок»: діючий блок або (за рішенням вище) заплановане блокування. */
+export const isShownAsBlocked = (isBlockedNow: boolean, hasFutureLock: boolean): boolean =>
+  isBlockedNow || (SHOW_SCHEDULED_AS_BLOCKED && hasFutureLock);
+
 export interface LockTimingResult {
   isBlocked: boolean; // "Так" (true) vs "Ні" (false)
   isScheduled: boolean; // Has clock icon ⏱
@@ -241,7 +253,7 @@ export function recomputeClientLocks(
 
   // Preserve non-standard sources if any
   const otherDetails = existingDetails.filter(
-    (d) => !['Клієнт', 'Об\'єднання', 'РСП', 'Склад', 'Маршрут'].includes(d.source)
+    (d) => !['Клієнт', 'Об\'єднання', 'Корпорація', 'РСП', 'Склад', 'Маршрут'].includes(d.source)
   ).filter((d) => !computeLockTimingState(d, now).isExpired);
 
   // 2. Cascade from activeObjectLocks
@@ -262,7 +274,29 @@ export function recomputeClientLocks(
         reason: unionLock.reason,
         startDate: unionLock.startDate,
         endDate: unionLock.endDate,
-        isScheduled: unionLock.isScheduled
+        isScheduled: unionLock.isScheduled,
+        groupName: unionLock.groupName
+      });
+    }
+  }
+
+  // Р3: Корпорація (за кодом корпорації клієнта або назвою)
+  const corpLock = activeObjectLocks.find(
+    (l) =>
+      l.targetType === 'Корпорація' &&
+      ((client.corpCode && l.targetCode === client.corpCode) ||
+        (client.corpName && l.targetName.toLowerCase() === client.corpName.toLowerCase()))
+  );
+  if (corpLock) {
+    const timing = computeLockTimingState(corpLock, now);
+    if (!timing.isExpired) {
+      applicableObjectLocks.push({
+        source: 'Корпорація',
+        reason: corpLock.reason,
+        startDate: corpLock.startDate,
+        endDate: corpLock.endDate,
+        isScheduled: corpLock.isScheduled,
+        groupName: corpLock.groupName
       });
     }
   }
@@ -282,7 +316,8 @@ export function recomputeClientLocks(
         reason: rspLock.reason,
         startDate: rspLock.startDate,
         endDate: rspLock.endDate,
-        isScheduled: rspLock.isScheduled
+        isScheduled: rspLock.isScheduled,
+        groupName: rspLock.groupName
       });
     }
   }
@@ -302,7 +337,8 @@ export function recomputeClientLocks(
         reason: deptLock.reason,
         startDate: deptLock.startDate,
         endDate: deptLock.endDate,
-        isScheduled: deptLock.isScheduled
+        isScheduled: deptLock.isScheduled,
+        groupName: deptLock.groupName
       });
     }
   }
@@ -322,7 +358,8 @@ export function recomputeClientLocks(
         reason: routeLock.reason,
         startDate: routeLock.startDate,
         endDate: routeLock.endDate,
-        isScheduled: routeLock.isScheduled
+        isScheduled: routeLock.isScheduled,
+        groupName: routeLock.groupName
       });
     }
   }

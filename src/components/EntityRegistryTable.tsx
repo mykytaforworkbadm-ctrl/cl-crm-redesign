@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
 import { EntityRegistryRow, EntityType } from '../types';
-import { formatClockTooltip, parseDateStringToMs } from '../utils/lockTiming';
+import { formatClockTooltip, isShownAsBlocked, parseDateStringToMs } from '../utils/lockTiming';
 
 interface EntityRegistryTableProps {
-  entityType: 'union' | 'rsp' | 'dept' | 'route';
+  entityType: 'union' | 'corp' | 'rsp' | 'dept' | 'route';
   rows: EntityRegistryRow[];
   onOpenChangeLock: (row: EntityRegistryRow) => void;
+  onOpenHistory?: (row: EntityRegistryRow) => void; // Р4: «+» відкриває вікно «Історія»
   showOnlyLocked: boolean;
   showScheduledLocks?: boolean;
 }
@@ -15,6 +16,7 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
   entityType,
   rows,
   onOpenChangeLock,
+  onOpenHistory,
   showOnlyLocked,
   showScheduledLocks = false
 }) => {
@@ -41,6 +43,8 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
     switch (entityType) {
       case 'union':
         return 'Об\'єднання';
+      case 'corp':
+        return 'Корпорація';
       case 'rsp':
         return 'РСП';
       case 'dept':
@@ -62,7 +66,8 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
     // Inline column filters
     if (colFilters.block !== '') {
       const isBlockedExpected = colFilters.block === '1';
-      if (r.isBlocked !== isBlockedExpected) return false;
+      // фільтр колонки «Блок» — за тим значенням, яке видно в колонці
+      if (isShownAsBlocked(r.isBlocked, Boolean(r.isFuture)) !== isBlockedExpected) return false;
     }
     if (colFilters.name && !r.name.toLowerCase().includes(colFilters.name.toLowerCase())) {
       return false;
@@ -190,12 +195,16 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
             <div className="ui-jqgrid-hbox">
               <table
                 className="ui-jqgrid-htable ui-common-table table table-bordered"
-                style={{ width: '100%', minWidth: showScheduledLocks ? 1360 : 1100 }}
+                style={{ width: '100%', minWidth: showScheduledLocks ? 1391 : 1131 }}
                 role="presentation"
               >
                 <thead>
                   {/* 1. Header Labels */}
                   <tr className="ui-jqgrid-labels" role="row">
+                    {/* 0: Історія (Р4) */}
+                    <th style={{ width: '31px' }} className="ui-th-column ui-th-ltr">
+                      <div className="ui-th-div"></div>
+                    </th>
                     {/* 1: Блок */}
                     <th
                       style={{ width: '70px', cursor: 'pointer' }}
@@ -308,6 +317,7 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
 
                   {/* 2. Inline Filters Row */}
                   <tr className="ui-search-toolbar" role="row">
+                    <th style={{ padding: '2px 4px' }}></th>
                     {/* Filter: Блок */}
                     <th style={{ padding: '2px 4px' }}>
                       <select
@@ -536,7 +546,7 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
           <div className="ui-jqgrid-bdiv" style={{ width: '100%', minHeight: 350 }}>
             <table
               className="ui-jqgrid-btable ui-common-table table table-bordered"
-              style={{ width: '100%', minWidth: showScheduledLocks ? 1360 : 1100 }}
+              style={{ width: '100%', minWidth: showScheduledLocks ? 1391 : 1131 }}
             >
               <tbody>
                 {pageRows.map((row) => {
@@ -546,10 +556,18 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
                       id={String(row.id)}
                       className="jqgrow ui-row-ltr"
                     >
+                      {/* 0: Історія (Р4) */}
+                      <td
+                        style={{ width: '31px', textAlign: 'center', cursor: 'pointer', fontWeight: 'bold', color: '#337ab7' }}
+                        title="Історія блокування"
+                        onClick={() => onOpenHistory && onOpenHistory(row)}
+                      >
+                        +
+                      </td>
                       {/* 1: Блок */}
                       <td style={{ width: '70px', textAlign: 'center', verticalAlign: 'middle' }}>
                         <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5 }}>
-                          {row.isBlocked ? (
+                          {isShownAsBlocked(row.isBlocked, Boolean(row.isFuture)) ? (
                             <span
                               style={{
                                 padding: '2px 6px',
@@ -632,8 +650,9 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
                       </td>
 
                       {/* 6: Причина */}
-                      <td style={{ width: '220px' }} title={row.reason}>
+                      <td style={{ width: '220px' }} title={row.groupName ? `${row.reason} (група «${row.groupName}»)` : row.reason}>
                         {row.reason || '\u00A0'}
+                        {row.groupName && <span style={{ color: '#6f42c1', fontSize: 11 }}> · група «{row.groupName}»</span>}
                       </td>
 
                       {/* 7: Кількість замовлень */}
@@ -663,7 +682,7 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
 
                 {pageRows.length === 0 && (
                   <tr>
-                    <td colSpan={showScheduledLocks ? 11 : 9} style={{ textAlign: 'center', padding: '20px', color: '#888' }}>
+                    <td colSpan={showScheduledLocks ? 12 : 10} style={{ textAlign: 'center', padding: '20px', color: '#888' }}>
                       Немає записів для відображення
                     </td>
                   </tr>
