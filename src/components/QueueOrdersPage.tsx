@@ -823,12 +823,17 @@ export const QueueOrdersPage: React.FC<QueueOrdersPageProps> = ({
                         <tbody>
                           <tr>
                             <td className="ui-search-input">
-                              <input
-                                type="text"
+                              {/* ТЗ 4.6: фільтр «Ігнорування» — усі / тільки з ознакою / тільки без */}
+                              <select
                                 className="form-control"
                                 value={columnFilters.pending}
                                 onChange={(e) => setColumnFilters({ ...columnFilters, pending: e.target.value })}
-                              />
+                                style={{ padding: 0, height: 22, fontSize: 11 }}
+                              >
+                                <option value="">Всі</option>
+                                <option value="Так">Так</option>
+                                <option value="Ні">Ні</option>
+                              </select>
                             </td>
                             <td className="ui-search-clear">
                               <a className="clearsearchclass" onClick={() => clearColumnFilter('pending')}>x</a>

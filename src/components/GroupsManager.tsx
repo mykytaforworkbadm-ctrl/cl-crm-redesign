@@ -31,7 +31,7 @@ interface GroupsManagerProps {
   kindLabel: string; // «Маршрути», «РСП» …
   groups: ObjectGroup[];
   catalog: CatalogItem[];
-  memberState: (id: number) => MemberState;
+  memberState: (id: number, groupName?: string) => MemberState; // groupName — стан саме блокування цієї групи
   onClose: () => void;
   onSelectGroup: (g: ObjectGroup) => void;
   onReimport: (g: ObjectGroup) => void;
@@ -46,9 +46,9 @@ export const isGroupEditable = (g: ObjectGroup, now: Date = new Date()): boolean
   return from === null ? false : now.getTime() < from;
 };
 
-export const groupStatus = (g: ObjectGroup, memberState: (id: number) => MemberState): string => {
+export const groupStatus = (g: ObjectGroup, memberState: (id: number, groupName?: string) => MemberState): string => {
   if (g.memberIds.length === 0) return 'Ні';
-  const st = g.memberIds.map((id) => memberState(id).status);
+  const st = g.memberIds.map((id) => memberState(id, g.name).status);
   if (st.every((x) => x === 'active')) return 'Так';
   if (st.every((x) => x === 'future')) return 'Заплановано';
   if (st.every((x) => x === 'none')) return 'Ні';

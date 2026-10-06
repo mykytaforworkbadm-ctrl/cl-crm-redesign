@@ -39,7 +39,8 @@ import {
   ObjectGroup
 } from './types';
 import { HistoryModal } from './components/HistoryModal';
-import { computeLockTimingState, recomputeClientLocks, formatToDisplayDateTime } from './utils/lockTiming';
+import { buildHistorySeed } from './data/historySeed';
+import { computeLockTimingState, recomputeClientLocks, formatToDisplayDateTime, pickPrimaryLock } from './utils/lockTiming';
 
 export default function App() {
   const [currentLang, setCurrentLang] = useState<'UA' | 'RU'>('UA');
@@ -62,7 +63,8 @@ export default function App() {
   const [objectLocks, setObjectLocks] = useState<ObjectLockRecord[]>(INITIAL_OBJECT_LOCKS);
   const [currentTime, setCurrentTime] = useState<Date>(() => new Date());
   // Р4: історія блокувань по рядках (ключ: client:<id> або obj:<тип>:<код>)
-  const [history, setHistory] = useState<Record<string, HistoryEntry[]>>({});
+  // Р4: вікно «Історія» одразу містить приклади (тестові дані, src/data/historySeed.ts)
+  const [history, setHistory] = useState<Record<string, HistoryEntry[]>>(() => buildHistorySeed(INITIAL_CLIENTS, INITIAL_OBJECT_LOCKS));
   const [historyTarget, setHistoryTarget] = useState<{ key: string; title: string } | null>(null);
   // Р1: групи об'єктів (створюються імпортом файлу у «Масова дія»)
   const [groups, setGroups] = useState<ObjectGroup[]>([]);
@@ -399,11 +401,13 @@ export default function App() {
   // Р4: знімок стану власних блокувань (клієнт — власне блокування, об'єкт — його блокування) для запису історії
   type LockSnap = { value: '0' | '1'; reason: string; from: string; to: string; edit: string };
   const prevSnapshotRef = React.useRef<Map<string, LockSnap> | null>(null);
+  const historyRef = React.useRef(history);
+  historyRef.current = history;
 
   const buildSnapshot = (locks: ObjectLockRecord[], clientsList: ClientRecord[], now: Date) => {
     const snap = new Map<string, LockSnap>();
     clientsList.forEach((c) => {
-      const own = c.lockDetails?.find((d) => d.source === 'Клієнт');
+      const own = pickPrimaryLock((c.lockDetails || []).filter((d) => d.source === 'Клієнт'), now);
       snap.set(`client:${c.id}`, {
         value: own && computeLockTimingState(own, now).isBlocked ? '1' : '0',
         reason: own ? own.reason : '',
@@ -412,8 +416,15 @@ export default function App() {
         edit: c.editDate ? c.editDate.split(' ')[0] : ''
       });
     });
+    // кілька записів на об'єкт (періоди не перетинаються) — в історії рядка стан основного: діючого або найближчого
+    const byKey = new Map<string, ObjectLockRecord[]>();
     locks.forEach((l) => {
-      snap.set(`obj:${l.targetType}:${l.targetCode}`, {
+      const k = `obj:${l.targetType}:${l.targetCode}`;
+      byKey.set(k, [...(byKey.get(k) || []), l]);
+    });
+    byKey.forEach((list, k) => {
+      const l = pickPrimaryLock<ObjectLockRecord>(list, now) || list[0];
+      snap.set(k, {
         value: computeLockTimingState(l, now).isBlocked ? '1' : '0',
         reason: l.reason,
         from: l.startDate ? formatToDisplayDateTime(l.startDate) : '',
@@ -439,7 +450,11 @@ export default function App() {
       const exists = next.has(key) && (b.reason !== '' || b.value === '1');
       const rows: HistoryEntry[] = [];
       if (exists && a.reason !== b.reason) rows.push({ action: 'Обновление', date: stamp, field: 'BLOCKING_REASON', oldValue: a.reason || '—', newValue: b.reason });
-      if (a.edit !== b.edit && b.edit) rows.push({ action: 'Обновление', date: stamp, field: 'EDIT_DATE', oldValue: a.edit || '—', newValue: b.edit });
+      if (a.edit !== b.edit && b.edit) {
+        // попередня дата змін — з останнього запису історії, якщо блокування на рядку зараз немає
+        const lastEdit = [...(historyRef.current[key] || [])].reverse().find((r) => r.field === 'EDIT_DATE')?.newValue;
+        rows.push({ action: 'Обновление', date: stamp, field: 'EDIT_DATE', oldValue: a.edit || lastEdit || '—', newValue: b.edit });
+      }
       if (a.value !== b.value) rows.push({ action: actor, date: stamp, field: 'VALUE', oldValue: a.value, newValue: b.value });
       // блокування зникло (знято користувачем або завершився період) — період очищається тією ж дією
       const periodActor = exists ? 'Обновление' : actor;
@@ -633,7 +648,12 @@ export default function App() {
 
     const updatedAllClients = allClientsRef.current.map((c) => {
       if (c.id === clientId) {
-        const otherSourceLocks = (c.lockDetails || []).filter((d) => d.source !== 'Клієнт');
+        // вікно редагує основне власне блокування клієнта (діюче, інакше найближче заплановане);
+        // інші власні записи без перетину періодів (напр. заплановане блокування групи) лишаються
+        const primaryOwn = pickPrimaryLock((c.lockDetails || []).filter((d) => d.source === 'Клієнт'), now);
+        const otherSourceLocks = (c.lockDetails || []).filter(
+          (d) => d !== primaryOwn && !(d.source === 'Клієнт' && computeLockTimingState(d, now).isExpired)
+        );
         const clientLockDetail = isBlocked
           ? [
               {
@@ -678,9 +698,12 @@ export default function App() {
 
     let nextLocks: ObjectLockRecord[];
     if (isBlocked) {
-      const existingIndex = objectLocksRef.current.findIndex(
-        (l) => l.targetType === targetType && (l.targetCode === targetCode || l.targetName === targetName)
+      // вікно редагує основний запис об'єкта (той, що показано в рядку реєстру)
+      const primary = pickPrimaryLock<ObjectLockRecord>(
+        objectLocksRef.current.filter((l) => l.targetType === targetType && (l.targetCode === targetCode || l.targetName === targetName)),
+        now
       );
+      const existingIndex = primary ? objectLocksRef.current.indexOf(primary) : -1;
       if (existingIndex >= 0) {
         nextLocks = [...objectLocksRef.current];
         nextLocks[existingIndex] = {
@@ -708,9 +731,12 @@ export default function App() {
         nextLocks = [newLock, ...objectLocksRef.current];
       }
     } else {
-      nextLocks = objectLocksRef.current.filter(
-        (l) => !(l.targetType === targetType && (l.targetCode === targetCode || l.targetName === targetName))
+      // знімається основний запис (показаний у вікні); інший запис без перетину (напр. заплановане на майбутнє) лишається
+      const primary = pickPrimaryLock<ObjectLockRecord>(
+        objectLocksRef.current.filter((l) => l.targetType === targetType && (l.targetCode === targetCode || l.targetName === targetName)),
+        now
       );
+      nextLocks = objectLocksRef.current.filter((l) => l !== primary);
     }
 
     recalculateStatusesWith(nextLocks, allClientsRef.current, now, 'Обновление');
@@ -719,6 +745,7 @@ export default function App() {
   // Navigate to Buffer page from client row or modal
   const handleDrilldownBuffer = (client: ClientRecord, showIgnoredOnly?: boolean) => {
     setDrilldownClient(client);
+    setSelectedClient(client); // ТЗ 4.1: після повернення на головну рядок клієнта підсвічений
     setDrilldownShowIgnoredOnly(Boolean(showIgnoredOnly));
     navigateTo('buffer');
   };
@@ -808,7 +835,12 @@ export default function App() {
 
       const updatedAllClients = allClientsRef.current.map((c) => {
         if (idSet.has(c.id)) {
-          const otherSourceLocks = (c.lockDetails || []).filter((d) => d.source !== 'Клієнт');
+          // Доповнення №1, розд. 2: «Замінити наявне блокування» немає — блокування з періодом, що перетинається,
+          // відсіяні у вікні підтвердження; наявні записи без перетину лишаються. Розблокування групи знімає
+          // тільки блокування цієї групи, звичайне розблокування — усі власні блокування клієнта.
+          const otherSourceLocks = (c.lockDetails || []).filter((d) =>
+            d.source !== 'Клієнт' ? true : isLocking ? true : groupName ? d.groupName !== groupName : false
+          );
           const newLockDetails = isLocking
             ? [
                 {
@@ -869,14 +901,17 @@ export default function App() {
           };
         });
 
-        const filtered = nextLocks.filter(
-          (l) => !(l.targetType === targetType && selectedIds.map(String).includes(l.targetCode))
-        );
-        nextLocks = [...newLocks, ...filtered];
+        // наявні записи без перетину періодів лишаються (перетин відсіяно у вікні підтвердження)
+        nextLocks = [...newLocks, ...nextLocks];
       } else {
-        // Unlock mass objects
+        // Unlock mass objects; розблокування групи — тільки блокування цієї групи
         nextLocks = nextLocks.filter(
-          (l) => !(l.targetType === targetType && selectedIds.map(String).includes(l.targetCode))
+          (l) =>
+            !(
+              l.targetType === targetType &&
+              selectedIds.map(String).includes(l.targetCode) &&
+              (!groupName || l.groupName === groupName)
+            )
         );
       }
 
@@ -923,10 +958,13 @@ export default function App() {
       return list
         .filter((u) => (filters.unionId > 0 ? u.value === filters.unionId : true))
         .map((u) => {
-          const lock = objectLocks.find(
+          const lock = pickPrimaryLock<ObjectLockRecord>(
+            objectLocks.filter(
             (l) =>
               l.targetType === 'Об\'єднання' &&
               (l.targetCode === String(u.value) || l.targetName.toLowerCase() === u.label.toLowerCase())
+          ),
+            currentTime
           );
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
           const relatedClients = clientsView.filter(
@@ -975,10 +1013,13 @@ export default function App() {
       return list
         .filter((c) => (filters.corpCode && filters.corpCode !== 'all' ? c.value === filters.corpCode || c.label === filters.corpCode : true))
         .map((c) => {
-          const lock = objectLocks.find(
+          const lock = pickPrimaryLock<ObjectLockRecord>(
+            objectLocks.filter(
             (l) =>
               l.targetType === 'Корпорація' &&
               (l.targetCode === c.value || l.targetName.toLowerCase() === c.label.toLowerCase())
+          ),
+            currentTime
           );
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
           const relatedClients = clientsView.filter((cl) => cl.corpCode === c.value || cl.corpName === c.label);
@@ -1024,10 +1065,13 @@ export default function App() {
       return list
         .filter((r) => (filters.rspId > 0 ? r.value === filters.rspId : true))
         .map((r) => {
-          const lock = objectLocks.find(
+          const lock = pickPrimaryLock<ObjectLockRecord>(
+            objectLocks.filter(
             (l) =>
               l.targetType === 'РСП' &&
               (l.targetCode === String(r.value) || l.targetName.toLowerCase() === r.label.toLowerCase())
+          ),
+            currentTime
           );
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
           const relatedClients = clientsView.filter(
@@ -1075,10 +1119,13 @@ export default function App() {
       return list
         .filter((d) => (filters.deptId !== 0 ? d.value === filters.deptId : true))
         .map((d) => {
-          const lock = objectLocks.find(
+          const lock = pickPrimaryLock<ObjectLockRecord>(
+            objectLocks.filter(
             (l) =>
               l.targetType === 'Склад' &&
               (l.targetCode === String(d.value) || l.targetName.toLowerCase() === d.label.toLowerCase())
+          ),
+            currentTime
           );
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
           const relatedClients = clientsView.filter(
@@ -1126,10 +1173,13 @@ export default function App() {
       return list
         .filter((rt) => (filters.routeId > 0 ? rt.value === filters.routeId : true))
         .map((rt) => {
-          const lock = objectLocks.find(
+          const lock = pickPrimaryLock<ObjectLockRecord>(
+            objectLocks.filter(
             (l) =>
               l.targetType === 'Маршрут' &&
               (l.targetCode === String(rt.value) || l.targetName.toLowerCase() === rt.label.toLowerCase())
+          ),
+            currentTime
           );
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
           const relatedClients = clientsView.filter(

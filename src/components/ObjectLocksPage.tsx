@@ -96,12 +96,12 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
 
   // Export to Excel / CSV (Requirement 2.8)
   const handleExportCsv = () => {
-    const headers = ['Тип об\'єкта', 'Код', 'Назва', 'Статус', 'Причина', 'Дата блокування', 'Хто встановив', 'Дата початку', 'Дата закінчення'];
+    // ТЗ 4.7: для об'єктів — тільки назва, без технічного коду
+    const headers = ['Тип об\'єкта', 'Назва', 'Статус', 'Причина', 'Дата блокування', 'Хто встановив', 'Дата початку', 'Дата закінчення'];
     const rows = filteredLocks.map((l) => {
       const timing = computeLockTimingState(l, new Date());
       return [
         l.targetType,
-        l.targetCode || '',
         `"${(l.targetName || '').replace(/"/g, '""')}"`,
         timing.isFuture ? 'Заплановане' : 'Активне',
         `"${(l.reason || '').replace(/"/g, '""')}"`,
@@ -513,7 +513,8 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
                         </td>
                         <td style={{ textAlign: 'center' }}>
                           <div style={{ display: 'inline-flex', gap: 4 }}>
-                            {lock.isScheduled && (
+                            {/* ТЗ 4.6: «Редагувати» — тільки у запланованого, до настання початку */}
+                            {timing.isFuture && (
                               <button
                                 type="button"
                                 className="btn btn-warning btn-xs"

@@ -237,6 +237,22 @@ export function computeLockTimingState(
  * Recomputes client status and lock details by cascading from active object locks
  * and client's own direct locks according to the current time.
  */
+/**
+ * Основний запис блокування об'єкта серед кількох (періоди не перетинаються): діючий, інакше найближчий запланований.
+ */
+export function pickPrimaryLock<T extends { startDate?: string; endDate?: string; isScheduled?: boolean }>(
+  locks: T[],
+  now: Date = new Date()
+): T | undefined {
+  const live = locks.filter((l) => !computeLockTimingState(l, now).isExpired);
+  const active = live.find((l) => computeLockTimingState(l, now).isBlocked);
+  if (active) return active;
+  const future = live
+    .filter((l) => computeLockTimingState(l, now).isFuture)
+    .sort((a, b) => (parseDateStringToMs(a.startDate) ?? 0) - (parseDateStringToMs(b.startDate) ?? 0));
+  return future[0] || live[0];
+}
+
 export function recomputeClientLocks(
   client: ClientRecord,
   activeObjectLocks: ObjectLockRecord[],
@@ -256,113 +272,40 @@ export function recomputeClientLocks(
     (d) => !['Клієнт', 'Об\'єднання', 'Корпорація', 'РСП', 'Склад', 'Маршрут'].includes(d.source)
   ).filter((d) => !computeLockTimingState(d, now).isExpired);
 
-  // 2. Cascade from activeObjectLocks
+  // 2. Cascade from activeObjectLocks.
+  // На один об'єкт може бути кілька записів з періодами, що не перетинаються (Доповнення №1, розд. 2:
+  // напр. активне безстрокове і заплановане на майбутнє) — на клієнта переносяться всі.
   const applicableObjectLocks: LockDetail[] = [];
-
-  // Union
-  const unionLock = activeObjectLocks.find(
-    (l) =>
-      l.targetType === 'Об\'єднання' &&
-      ((client.unionId && l.targetCode === String(client.unionId)) ||
-        (client.unionName && l.targetName.toLowerCase() === client.unionName.toLowerCase()))
-  );
-  if (unionLock) {
-    const timing = computeLockTimingState(unionLock, now);
-    if (!timing.isExpired) {
-      applicableObjectLocks.push({
-        source: 'Об\'єднання',
-        reason: unionLock.reason,
-        startDate: unionLock.startDate,
-        endDate: unionLock.endDate,
-        isScheduled: unionLock.isScheduled,
-        groupName: unionLock.groupName
-      });
-    }
-  }
-
-  // Р3: Корпорація (за кодом корпорації клієнта або назвою)
-  const corpLock = activeObjectLocks.find(
-    (l) =>
-      l.targetType === 'Корпорація' &&
-      ((client.corpCode && l.targetCode === client.corpCode) ||
-        (client.corpName && l.targetName.toLowerCase() === client.corpName.toLowerCase()))
-  );
-  if (corpLock) {
-    const timing = computeLockTimingState(corpLock, now);
-    if (!timing.isExpired) {
-      applicableObjectLocks.push({
-        source: 'Корпорація',
-        reason: corpLock.reason,
-        startDate: corpLock.startDate,
-        endDate: corpLock.endDate,
-        isScheduled: corpLock.isScheduled,
-        groupName: corpLock.groupName
-      });
-    }
-  }
-
-  // RSP
-  const rspLock = activeObjectLocks.find(
-    (l) =>
-      l.targetType === 'РСП' &&
-      ((client.rspId && l.targetCode === String(client.rspId)) ||
-        (client.rspName && l.targetName.toLowerCase() === client.rspName.toLowerCase()))
-  );
-  if (rspLock) {
-    const timing = computeLockTimingState(rspLock, now);
-    if (!timing.isExpired) {
-      applicableObjectLocks.push({
-        source: 'РСП',
-        reason: rspLock.reason,
-        startDate: rspLock.startDate,
-        endDate: rspLock.endDate,
-        isScheduled: rspLock.isScheduled,
-        groupName: rspLock.groupName
-      });
-    }
-  }
-
-  // Dept / Warehouse
-  const deptLock = activeObjectLocks.find(
-    (l) =>
-      l.targetType === 'Склад' &&
-      ((client.deptId && l.targetCode === String(client.deptId)) ||
-        (client.deptName && l.targetName.toLowerCase() === client.deptName.toLowerCase()))
-  );
-  if (deptLock) {
-    const timing = computeLockTimingState(deptLock, now);
-    if (!timing.isExpired) {
-      applicableObjectLocks.push({
-        source: 'Склад',
-        reason: deptLock.reason,
-        startDate: deptLock.startDate,
-        endDate: deptLock.endDate,
-        isScheduled: deptLock.isScheduled,
-        groupName: deptLock.groupName
-      });
-    }
-  }
-
-  // Route
-  const routeLock = activeObjectLocks.find(
-    (l) =>
-      l.targetType === 'Маршрут' &&
-      ((client.routeId && l.targetCode === String(client.routeId)) ||
-        (client.routeName && l.targetName.toLowerCase() === client.routeName.toLowerCase()))
-  );
-  if (routeLock) {
-    const timing = computeLockTimingState(routeLock, now);
-    if (!timing.isExpired) {
-      applicableObjectLocks.push({
-        source: 'Маршрут',
-        reason: routeLock.reason,
-        startDate: routeLock.startDate,
-        endDate: routeLock.endDate,
-        isScheduled: routeLock.isScheduled,
-        groupName: routeLock.groupName
-      });
-    }
-  }
+  const cascade = (
+    source: LockDetail['source'],
+    targetType: ObjectLockRecord['targetType'],
+    code: string | undefined,
+    name: string | undefined
+  ) => {
+    activeObjectLocks
+      .filter(
+        (l) =>
+          l.targetType === targetType &&
+          ((code && l.targetCode === code) || (name && l.targetName.toLowerCase() === name.toLowerCase()))
+      )
+      .filter((l) => !computeLockTimingState(l, now).isExpired)
+      .forEach((l) =>
+        applicableObjectLocks.push({
+          source,
+          reason: l.reason,
+          startDate: l.startDate,
+          endDate: l.endDate,
+          isScheduled: l.isScheduled,
+          groupName: l.groupName
+        })
+      );
+  };
+  cascade('Об\'єднання', 'Об\'єднання', client.unionId ? String(client.unionId) : undefined, client.unionName);
+  // Р3: корпорація (за кодом корпорації клієнта або назвою)
+  cascade('Корпорація', 'Корпорація', client.corpCode || undefined, client.corpName);
+  cascade('РСП', 'РСП', client.rspId ? String(client.rspId) : undefined, client.rspName);
+  cascade('Склад', 'Склад', client.deptId ? String(client.deptId) : undefined, client.deptName);
+  cascade('Маршрут', 'Маршрут', client.routeId ? String(client.routeId) : undefined, client.routeName);
 
   const allDetails = [...validDirectDetails, ...applicableObjectLocks, ...otherDetails];
 

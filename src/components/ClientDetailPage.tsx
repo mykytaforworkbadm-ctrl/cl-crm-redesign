@@ -2,9 +2,9 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { DateTimeInput } from './DateTimeInput';
 import { useGridColumns } from '../utils/useGridColumns';
 import { useDraggableDialog } from '../utils/useDraggableDialog';
-import { ClientRecord, ObjectLockRecord, QueueOrder, QueueColumnFilters } from '../types';
+import { ClientRecord, LockDetail, ObjectLockRecord, QueueOrder, QueueColumnFilters } from '../types';
 import { MANUAL_BLOCKING_REASONS, RSPS_DATA, DEPTS_DATA, ROUTES_DATA } from '../data/mockData';
-import { computeLockTimingState } from '../utils/lockTiming';
+import { computeLockTimingState, pickPrimaryLock } from '../utils/lockTiming';
 
 interface ClientDetailPageProps {
   client: ClientRecord;
@@ -49,7 +49,8 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
 
   // Власне блокування клієнта (джерело «Клієнт»). Блокування об'єднання, РСП, маршруту, складу
   // показуються окремо в «Інші діючі блокування» і в цій формі не редагуються (принцип прямих дій).
-  const directLock = client.lockDetails?.find((d) => d.source === 'Клієнт');
+  // основне власне блокування (діюче, інакше найближче заплановане) — саме його редагує вікно
+  const directLock = pickPrimaryLock<LockDetail>((client.lockDetails || []).filter((d) => d.source === 'Клієнт'));
 
   // Sync state when client prop changes
   useEffect(() => {
@@ -138,10 +139,12 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
     if (type === 'Об\'єднання') {
       name = client.unionName || 'Не прив\'язано';
       if (client.unionName) {
-        const found = objectLocks.find(
+        const found = pickPrimaryLock<ObjectLockRecord>(
+          objectLocks.filter(
           (o) =>
             o.targetType === 'Об\'єднання' &&
             (o.targetName === client.unionName || (client.unionId && o.targetCode === String(client.unionId)))
+        )
         );
         if (found) {
           const timing = computeLockTimingState(found, new Date());
@@ -164,10 +167,12 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
     } else if (type === 'РСП') {
       name = client.rspName || (client.rspId ? RSPS_DATA.find((r) => r.value === client.rspId)?.label || 'Не призначено' : 'Не призначено');
       if (client.rspName || client.rspId) {
-        const found = objectLocks.find(
+        const found = pickPrimaryLock<ObjectLockRecord>(
+          objectLocks.filter(
           (o) =>
             o.targetType === 'РСП' &&
             (o.targetName === client.rspName || (client.rspId && o.targetCode === String(client.rspId)))
+        )
         );
         if (found) {
           const timing = computeLockTimingState(found, new Date());
@@ -190,10 +195,12 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
     } else if (type === 'Маршрут') {
       name = client.routeName || (client.routeId ? ROUTES_DATA.find((r) => r.value === client.routeId)?.label || 'Не призначено' : 'Не призначено');
       if (client.routeName || client.routeId) {
-        const found = objectLocks.find(
+        const found = pickPrimaryLock<ObjectLockRecord>(
+          objectLocks.filter(
           (o) =>
             o.targetType === 'Маршрут' &&
             (o.targetName === client.routeName || (client.routeId && o.targetCode === String(client.routeId)))
+        )
         );
         if (found) {
           const timing = computeLockTimingState(found, new Date());
@@ -216,10 +223,12 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
     } else if (type === 'Склад') {
       name = client.deptName || (client.deptId ? DEPTS_DATA.find((d) => d.value === client.deptId)?.label || 'Не призначено' : 'Не призначено');
       if (client.deptName || client.deptId) {
-        const found = objectLocks.find(
+        const found = pickPrimaryLock<ObjectLockRecord>(
+          objectLocks.filter(
           (o) =>
             o.targetType === 'Склад' &&
             (o.targetName === client.deptName || (client.deptId && o.targetCode === String(client.deptId)))
+        )
         );
         if (found) {
           const timing = computeLockTimingState(found, new Date());
@@ -904,7 +913,7 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                   lineHeight: 1.35
                 }}
               >
-                ℹ️ Якщо клієнт розблокований тут, але на нього діє блокування РСП, Складу або Маршруту — його замовлення залишатимуться в буфері до зняття блокування відповідного об'єкта.
+                ℹ️ Якщо клієнт розблокований тут, але на нього діє блокування об'єднання, корпорації, РСП, складу або маршруту — його замовлення залишатимуться в буфері до зняття блокування відповідного об'єкта.
               </div>
             </div>
             )}
@@ -1548,12 +1557,17 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                           <tbody>
                             <tr>
                               <td className="ui-search-input">
-                                <input
-                                  type="text"
+                                {/* ТЗ 4.6: фільтр «Ігнорування» — усі / тільки з ознакою / тільки без */}
+                                <select
                                   className="form-control"
                                   value={columnFilters.pending}
                                   onChange={(e) => setColumnFilters({ ...columnFilters, pending: e.target.value })}
-                                />
+                                  style={{ padding: 0, height: 22, fontSize: 11 }}
+                                >
+                                  <option value="">Всі</option>
+                                  <option value="Так">Так</option>
+                                  <option value="Ні">Ні</option>
+                                </select>
                               </td>
                               <td className="ui-search-clear">
                                 <a className="clearsearchclass" onClick={() => clearColumnFilter('pending')}>x</a>

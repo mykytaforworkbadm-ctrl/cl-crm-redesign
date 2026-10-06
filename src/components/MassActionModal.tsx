@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
 import { DateTimeInput } from './DateTimeInput';
-import { ClientRecord, ObjectLockRecord, ObjectGroup, GroupKind } from '../types';
+import { ClientRecord, LockDetail, ObjectLockRecord, ObjectGroup, GroupKind } from '../types';
 import { GroupsManager, CatalogItem, MemberState, isGroupEditable } from './GroupsManager';
 import { UNIONS_DATA, DEPTS_DATA, RSPS_DATA, ROUTES_DATA, CORPORATIONS_DATA, MANUAL_BLOCKING_REASONS } from '../data/mockData';
-import { computeLockTimingState, formatToDisplayDateTime, isShownAsBlocked } from '../utils/lockTiming';
+import { computeLockTimingState, formatToDisplayDateTime, isShownAsBlocked, pickPrimaryLock } from '../utils/lockTiming';
 import { readXlsxCodes } from '../utils/readXlsxCodes';
 import { getFutureLockDetail } from './ClientsTable';
 
@@ -132,14 +132,20 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       // Довідник поточної вкладки: id + усі значення, за якими можна знайти об'єкт (код, ID, назва)
       const catalog: { id: number; keys: string[] }[] =
         activeTab === 'clients'
-          ? clients.map((c) => ({ id: c.id, keys: [c.clCode, String(c.id)] }))
+          ? clients.map((c) => ({ id: c.id, keys: [c.clCode, String(c.id), c.clName] })) // п. 1 погодження: по коду / по назві клієнтів
           : activeTab === 'routes'
           ? ROUTES_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, keys: [r.label, String(r.value)] }))
           : activeTab === 'rsps'
           ? RSPS_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, keys: [r.label, (r as { code?: string }).code || '', String(r.value)] }))
           : DEPTS_DATA.filter((d) => d.value !== 0).map((d) => ({ id: d.value, keys: [d.label, (d as { code?: string }).code || '', String(d.value)] }));
-      const index = new Map<string, number>();
-      catalog.forEach((item) => item.keys.filter(Boolean).forEach((k) => index.set(norm(k), item.id)));
+      // значення → id (однакова назва в кількох клієнтів — обираються всі)
+      const index = new Map<string, number[]>();
+      catalog.forEach((item) =>
+        item.keys.filter(Boolean).forEach((k) => {
+          const ids = index.get(norm(k)) || [];
+          if (!ids.includes(item.id)) index.set(norm(k), [...ids, item.id]);
+        })
+      );
 
       let rows = raw;
       let skippedHeader = '';
@@ -153,9 +159,9 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       const notFound: string[] = [];
       let duplicates = 0;
       rows.forEach((v) => {
-        const id = index.get(norm(v));
-        if (id === undefined) notFound.push(v);
-        else if (!foundIds.includes(id)) foundIds.push(id);
+        const ids = index.get(norm(v));
+        if (!ids) notFound.push(v);
+        else if (ids.some((id) => !foundIds.includes(id))) ids.forEach((id) => { if (!foundIds.includes(id)) foundIds.push(id); });
         else duplicates += 1;
       });
 
@@ -208,7 +214,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       }
 
       const parts = [
-        `Файл «${importFile.name}»: рядків з кодами — ${rows.length}.`,
+        `Файл «${importFile.name}»: рядків з кодами або назвами — ${rows.length}.`,
         `Знайдено і виділено ${tabLabel}: ${foundIds.length}.`,
         notFound.length > 0 ? `Не знайдено: ${notFound.length}.` : 'Усі коди з файлу знайдено.',
         duplicates > 0 ? `Повторів у файлі: ${duplicates}.` : '',
@@ -249,24 +255,31 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       ? clients.map((c) => ({ id: c.id, code: c.clCode, name: c.clName }))
       : kind === 'routes'
       ? ROUTES_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, code: r.label, name: r.label }))
-      : kind === 'rsps'
-      ? RSPS_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, code: (r as { code?: string }).code || String(r.value), name: r.label }))
-      : DEPTS_DATA.filter((d) => d.value !== 0).map((d) => ({ id: d.value, code: (d as { code?: string }).code || String(d.value), name: d.label }));
+      : // ТЗ 4.7: для РСП і складів (як і маршрутів) — тільки назва, без технічного коду
+      kind === 'rsps'
+      ? RSPS_DATA.filter((r) => r.value !== 0).map((r) => ({ id: r.value, code: r.label, name: r.label }))
+      : DEPTS_DATA.filter((d) => d.value !== 0).map((d) => ({ id: d.value, code: d.label, name: d.label }));
 
-  // Стан блокування об'єкта (для колонок і статусу групи): власне блокування клієнта / блокування об'єкта
-  const lockOf = (kind: GroupKind, id: number) => {
+  // Основне блокування об'єкта (діюче, інакше найближче заплановане); groupName — тільки блокування цієї групи
+  const lockOf = (kind: GroupKind, id: number, groupName?: string) => {
     if (kind === 'clients') {
       const c = clients.find((x) => x.id === id);
-      const own = c?.lockDetails?.find((d) => d.source === 'Клієнт');
+      const own = pickPrimaryLock<LockDetail>(
+        (c?.lockDetails || []).filter((d) => d.source === 'Клієнт' && (!groupName || d.groupName === groupName))
+      );
       return own
         ? { startDate: own.startDate, endDate: own.endDate, isScheduled: own.isScheduled, lockDate: c?.editDate || '', lockedBy: c?.editUser || '', reason: own.reason }
         : null;
     }
-    const l = objectLocks.find((x) => x.targetType === targetTypeOf(kind) && x.targetCode === String(id));
+    const l = pickPrimaryLock<ObjectLockRecord>(
+      objectLocks.filter(
+        (x) => x.targetType === targetTypeOf(kind) && x.targetCode === String(id) && (!groupName || x.groupName === groupName)
+      )
+    );
     return l ? { startDate: l.startDate, endDate: l.endDate, isScheduled: l.isScheduled, lockDate: l.lockDate, lockedBy: l.lockedBy, reason: l.reason } : null;
   };
-  const memberStateFor = (kind: GroupKind) => (id: number): MemberState => {
-    const l = lockOf(kind, id);
+  const memberStateFor = (kind: GroupKind) => (id: number, groupName?: string): MemberState => {
+    const l = lockOf(kind, id, groupName);
     if (!l) return { status: 'none' };
     const t = computeLockTimingState(l, new Date());
     return { status: t.isExpired ? 'none' : t.isFuture ? 'future' : 'active' };
@@ -288,7 +301,18 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
     const removed = g.memberIds.filter((id) => !memberIds.includes(id));
     updateGroups(groups.map((x) => (x.id === g.id ? { ...x, memberIds, editedAt: nowStamp(), editedBy: CURRENT_USER } : x)));
     if (g.lastAction === 'lock' && isGroupEditable(g)) {
-      if (added.length) onApplyMassAction(g.kind, added, 'lock', g.reason || 'Блокування НКЦ', g.lockFrom, g.lockTo || undefined, added.length, 0, g.name);
+      // «Замінити наявне блокування» немає: доданий об'єкт з блокуванням, період якого перетинається, блокування групи не отримує
+      const overlaps = (id: number) => {
+        const list =
+          g.kind === 'clients'
+            ? (clients.find((x) => x.id === id)?.lockDetails || []).filter((d) => d.source === 'Клієнт')
+            : objectLocks.filter((l) => l.targetType === targetTypeOf(g.kind) && l.targetCode === String(id));
+        return list.some((l) => !computeLockTimingState(l, new Date()).isExpired && checkPeriodsOverlap(g.lockFrom, g.lockTo || undefined, l.startDate, l.endDate));
+      };
+      const addOk = added.filter((id) => !overlaps(id));
+      // результат (скільки пропущено через наявні блокування) — у звичайному повідомленні над реєстром, без окремого алерта
+      if (added.length)
+        onApplyMassAction(g.kind, addOk, 'lock', g.reason || 'Блокування НКЦ', g.lockFrom, g.lockTo || undefined, addOk.length, added.length - addOk.length, g.name);
       const removedOwn = removed.filter((id) => {
         if (g.kind === 'clients') {
           const c = clients.find((x) => x.id === id);
@@ -507,23 +531,16 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
           let conflictPeriod = '';
           let conflictUser = client.editUser || 'EDIQ';
 
-          if (client.isBlocked || client.isScheduled) {
-            // Check all client lock details
-            const details = client.lockDetails && client.lockDetails.length > 0
-              ? client.lockDetails
-              : [{
-                  source: 'Клієнт' as const,
-                  reason: client.reason || 'Кредитний ліміт',
-                  startDate: client.scheduledStart,
-                  endDate: client.scheduledEnd,
-                  isScheduled: client.isScheduled
-                }];
+          {
+            // «Один блок на об'єкт»: конфлікт дає тільки власне блокування клієнта; блокування через об'єднання,
+            // РСП, маршрут, склад — інші об'єкти і з блокуванням клієнта співіснують (сценарій «два одночасні блоки»)
+            const details = (client.lockDetails || []).filter((d) => d.source === 'Клієнт');
 
             for (const d of details) {
               const timing = computeLockTimingState(d, new Date());
               if (timing.isExpired) continue;
-              const dStart = d.startDate || (d.isScheduled ? client.scheduledStart : undefined);
-              const dEnd = d.endDate || (d.isScheduled ? client.scheduledEnd : undefined);
+              const dStart = d.startDate;
+              const dEnd = d.endDate;
               if (checkPeriodsOverlap(startDateTime, endDateTime, dStart, dEnd)) {
                 hasConflict = true;
                 conflictReason = d.reason || client.reason || 'Блокування';
@@ -554,8 +571,13 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
         // Other entity types (routes, rsps, depts)
         const targetType = activeTab === 'routes' ? 'Маршрут' : activeTab === 'rsps' ? 'РСП' : 'Склад';
         ids.forEach((id) => {
+          // на об'єкті може бути кілька записів (періоди не перетинаються) — перевіряємо кожен
           const existingLock = objectLocks.find(
-            (l) => l.targetType === targetType && l.targetCode === String(id)
+            (l) =>
+              l.targetType === targetType &&
+              l.targetCode === String(id) &&
+              !computeLockTimingState(l, new Date()).isExpired &&
+              checkPeriodsOverlap(startDateTime, endDateTime, l.startDate, l.endDate)
           );
 
           let name = String(id);
@@ -1247,7 +1269,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                   <p style={{ fontSize: 13, color: '#333', marginBottom: 12 }}>
                     {importTargetGroupId
                       ? `Оновлення складу групи «${groups.find((g) => g.id === importTargetGroupId)?.name || ''}»: оберіть файл Excel (.xlsx) з новим списком.`
-                      : "Оберіть файл Excel (.xlsx) зі списком кодів. Об'єкти з файлу будуть виділені і збережені як група з назвою файлу."}
+                      : "Оберіть файл Excel (.xlsx) зі списком кодів або назв (по одному в рядку). Об'єкти з файлу будуть виділені і збережені як група з назвою файлу."}
                   </p>
                   <div className="form-group" style={{ marginBottom: 12 }}>
                     <label style={{ fontSize: 12, fontWeight: 'bold' }}>Файл для імпорту (.xlsx):</label>
@@ -1364,16 +1386,19 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                       </div>
                     )}
 
-                    <div style={{ display: 'flex' }}>
-                      <span style={{ width: 90, color: '#666', fontWeight: 'bold' }}>Період:</span>
-                      <span style={{ color: '#333' }}>
-                        {startDateTime || endDateTime ? (
-                          `з ${startDateTime ? formatToDisplayDateTime(startDateTime) : 'негайно'} по ${endDateTime ? formatToDisplayDateTime(endDateTime) : 'безстроково'}`
-                        ) : (
-                          'Негайно і безстроково'
-                        )}
-                      </span>
-                    </div>
+                    {/* період — тільки для блокування (розблокування знімає блокування одразу) */}
+                    {pendingAction === 'lock' && (
+                      <div style={{ display: 'flex' }}>
+                        <span style={{ width: 90, color: '#666', fontWeight: 'bold' }}>Період:</span>
+                        <span style={{ color: '#333' }}>
+                          {startDateTime || endDateTime ? (
+                            `з ${startDateTime ? formatToDisplayDateTime(startDateTime) : 'негайно'} по ${endDateTime ? formatToDisplayDateTime(endDateTime) : 'безстроково'}`
+                          ) : (
+                            'Негайно і безстроково'
+                          )}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Conflict Notice & List */}
@@ -1400,7 +1425,8 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                         <table className="table table-condensed table-striped" style={{ margin: 0 }}>
                           <thead>
                             <tr style={{ backgroundColor: '#fcf2f2', color: '#666' }}>
-                              <th style={{ width: 85 }}>Код</th>
+                              {/* ТЗ 4.7: для маршрутів, РСП і складів — тільки назва, без технічного коду */}
+                              {activeTab === 'clients' && <th style={{ width: 85 }}>Код</th>}
                               <th>Назва</th>
                               <th>Причина</th>
                               <th>Період дії</th>
@@ -1410,8 +1436,8 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                           <tbody>
                             {conflictedItems.map((c) => (
                               <tr key={String(c.id)}>
-                                <td style={{ fontWeight: 'bold' }}>{c.code}</td>
-                                <td>{c.name}</td>
+                                {activeTab === 'clients' && <td style={{ fontWeight: 'bold' }}>{c.code}</td>}
+                                <td style={activeTab === 'clients' ? undefined : { fontWeight: 'bold' }}>{c.name}</td>
                                 <td>{c.reason}</td>
                                 <td style={{ whiteSpace: 'nowrap' }}>{c.periodText}</td>
                                 <td style={{ color: '#555' }}>{c.lockedBy}</td>
