@@ -35,6 +35,17 @@ export const getFutureLockDetail = (client: ClientRecord) => {
   );
 };
 
+// Підказка годинника: окремий рядок для кожного блокування з періодом — діюче за розкладом
+// («Увімкнено за розкладом») або майбутнє («Заплановано»), з позначкою об'єкта
+export const clockTooltipOf = (client: ClientRecord): string => {
+  const rows = (client.lockDetails || [])
+    .filter((d) => d.startDate || d.endDate)
+    .map((d) => ({ d, t: computeLockTimingState(d) }))
+    .filter(({ t }) => !t.isExpired)
+    .map(({ d, t }) => `[${d.source}${d.groupName ? ` · група «${d.groupName}»` : ''}] ${formatClockTooltip(t.isBlocked, d.startDate, d.endDate)}`);
+  return rows.join('\n');
+};
+
 export const getScheduledObject = (client: ClientRecord): string => {
   const futureDetail = getFutureLockDetail(client);
   if (futureDetail) return futureDetail.source;
@@ -865,11 +876,7 @@ export const ClientsTable: React.FC<ClientsTableProps> = ({
                           )}
                           {client.isScheduled && (
                             <span
-                              title={formatClockTooltip(
-                                client.isBlocked,
-                                client.scheduledStart || client.lockDetails?.find((d) => d.isScheduled || d.startDate)?.startDate,
-                                client.scheduledEnd || client.lockDetails?.find((d) => d.isScheduled || d.endDate)?.endDate
-                              )}
+                              title={clockTooltipOf(client)}
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',

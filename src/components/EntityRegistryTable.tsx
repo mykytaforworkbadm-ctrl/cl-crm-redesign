@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
+import { usePersistentState } from '../utils/usePersistentState';
 import { EntityRegistryRow, EntityType } from '../types';
 import { formatClockTooltip, isShownAsBlocked, parseDateStringToMs } from '../utils/lockTiming';
 
@@ -22,13 +23,13 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
 }) => {
   // В5: шапка рухається з таблицею при горизонтальній прокрутці, ширина колонок змінюється перетягуванням межі
   const gridRef = useGridColumns();
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const [pageSize, setPageSize] = useState<number>(10);
-  const [sortField, setSortField] = useState<keyof EntityRegistryRow | null>('name');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [currentPage, setCurrentPage] = usePersistentState<number>(`ent:${entityType}:page`, 1);
+  const [pageSize, setPageSize] = usePersistentState<number>(`ent:${entityType}:size`, 10);
+  const [sortField, setSortField] = usePersistentState<keyof EntityRegistryRow | null>(`ent:${entityType}:sort`, 'name');
+  const [sortDir, setSortDir] = usePersistentState<'asc' | 'desc'>(`ent:${entityType}:dir`, 'asc');
 
   // Inline column filters
-  const [colFilters, setColFilters] = useState({
+  const [colFilters, setColFilters] = usePersistentState(`ent:${entityType}:cols`, {
     block: '',
     name: '',
     editDate: '',
@@ -99,6 +100,18 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
     const aVal = a[sortField];
     const bVal = b[sortField];
 
+    // Ф2: період блокування сортується як дата, а не як рядок
+    if (sortField === 'startDate' || sortField === 'endDate') {
+      // у режимі запланованих — період запланованого запису (як у колонках)
+      const pa = sortField === 'startDate' ? a.futureStart || a.startDate : a.futureStart ? a.futureEnd : a.endDate;
+      const pb = sortField === 'startDate' ? b.futureStart || b.startDate : b.futureStart ? b.futureEnd : b.endDate;
+      const msA = parseDateStringToMs(String(pa || '')) ?? Infinity;
+      const msB = parseDateStringToMs(String(pb || '')) ?? Infinity;
+      if (msA === msB) return 0;
+      return sortDir === 'asc' ? (msA < msB ? -1 : 1) : (msA < msB ? 1 : -1);
+    }
+
+
     if (aVal === bVal) return 0;
     if (aVal === undefined || aVal === null || aVal === '') return 1;
     if (bVal === undefined || bVal === null || bVal === '') return -1;
@@ -111,14 +124,6 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
     // Booleans
     if (typeof aVal === 'boolean' && typeof bVal === 'boolean') {
       return sortDir === 'asc' ? (aVal ? -1 : 1) : (aVal ? 1 : -1);
-    }
-
-    // Ф2: період блокування сортується як дата, а не як рядок
-    if (sortField === 'startDate' || sortField === 'endDate') {
-      const msA = parseDateStringToMs(String(aVal)) ?? Infinity;
-      const msB = parseDateStringToMs(String(bVal)) ?? Infinity;
-      if (msA === msB) return 0;
-      return sortDir === 'asc' ? (msA < msB ? -1 : 1) : (msA < msB ? 1 : -1);
     }
 
     // Formatted sums e.g. "142 800,00"
@@ -601,9 +606,14 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
                               Ні
                             </span>
                           )}
-                          {row.isScheduled && (
+                          {(row.isScheduled || row.isFuture) && (
                             <span
-                              title={formatClockTooltip(row.isBlocked, row.startDate, row.endDate)}
+                              title={[
+                                row.isScheduled && (row.startDate || row.endDate) ? formatClockTooltip(row.isBlocked, row.startDate, row.endDate) : '',
+                                row.futureReason ? formatClockTooltip(false, row.futureStart, row.futureEnd) : ''
+                              ]
+                                .filter(Boolean)
+                                .join('\n')}
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
@@ -653,6 +663,17 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
                       <td style={{ width: '220px' }} title={row.groupName ? `${row.reason} (група «${row.groupName}»)` : row.reason}>
                         {row.reason || '\u00A0'}
                         {row.groupName && <span style={{ color: '#6f42c1', fontSize: 11 }}> · група «{row.groupName}»</span>}
+                        {/* рішення 06.10: майбутнє блокування видно в «Причині» одразу */}
+                        {row.isFuture && row.futureStart && !row.futureReason && (
+                          <span style={{ color: '#a06000', fontSize: 10 }}> (⏱ з {row.futureStart})</span>
+                        )}
+                        {row.futureReason && (
+                          <span style={{ display: 'block', fontSize: 11 }}>
+                            {row.futureReason}
+                            {row.futureGroup && <span style={{ color: '#6f42c1', fontSize: 11 }}> · група «{row.futureGroup}»</span>}
+                            <span style={{ color: '#a06000', fontSize: 10 }}> (⏱ з {row.futureStart})</span>
+                          </span>
+                        )}
                       </td>
 
                       {/* 7: Кількість замовлень */}
@@ -672,8 +693,8 @@ export const EntityRegistryTable: React.FC<EntityRegistryTableProps> = ({
 
                       {showScheduledLocks && (
                         <>
-                          <td style={{ width: '130px', textAlign: 'center' }}>{row.startDate || '—'}</td>
-                          <td style={{ width: '130px', textAlign: 'center' }}>{row.endDate || '—'}</td>
+                          <td style={{ width: '130px', textAlign: 'center' }}>{row.futureStart || row.startDate || '—'}</td>
+                          <td style={{ width: '130px', textAlign: 'center' }}>{row.futureStart ? row.futureEnd || '—' : row.endDate || '—'}</td>
                         </>
                       )}
                     </tr>

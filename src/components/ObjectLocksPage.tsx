@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { DateTimeInput } from './DateTimeInput';
 import { useGridColumns } from '../utils/useGridColumns';
+import { usePersistentState } from '../utils/usePersistentState';
 import { ObjectLockRecord, EntityType, ClientRecord } from '../types';
 import { MANUAL_BLOCKING_REASONS } from '../data/mockData';
-import { computeLockTimingState, formatToDisplayDateTime, formatClockTooltip } from '../utils/lockTiming';
+import { computeLockTimingState, formatToDisplayDateTime, formatClockTooltip, validatePeriod, overlapMessage } from '../utils/lockTiming';
 
 interface ObjectLocksPageProps {
   objectLocks: ObjectLockRecord[];
@@ -28,9 +29,9 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
 }) => {
   // В5: шапка рухається з таблицею при горизонтальній прокрутці, ширина колонок змінюється перетягуванням межі
   const gridRef = useGridColumns();
-  const [filterType, setFilterType] = useState<string>(initialFilterType || 'all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'scheduled'>('all');
-  const [searchQuery, setSearchQuery] = useState<string>(initialSearchQuery || '');
+  const [filterType, setFilterType] = usePersistentState<string>('obj:type', initialFilterType || 'all');
+  const [statusFilter, setStatusFilter] = usePersistentState<'all' | 'active' | 'scheduled'>('obj:status', 'all');
+  const [searchQuery, setSearchQuery] = usePersistentState<string>('obj:search', initialSearchQuery || '');
 
   useEffect(() => {
     if (initialFilterType) {
@@ -159,6 +160,17 @@ export const ObjectLocksPage: React.FC<ObjectLocksPageProps> = ({
     const formattedStartDate = formatFromInputDate(editStartDate);
     const formattedEndDate = formatFromInputDate(editEndDate);
     const isStillScheduled = Boolean(formattedStartDate || formattedEndDate);
+    const err =
+      validatePeriod(formattedStartDate, formattedEndDate) ||
+      overlapMessage(
+        objectLocks.filter((l) => l.id !== editingLock.id && l.targetType === editingLock.targetType && l.targetCode === editingLock.targetCode),
+        formattedStartDate,
+        formattedEndDate
+      );
+    if (err) {
+      window.alert(err);
+      return;
+    }
     const updated: ObjectLockRecord = {
       ...editingLock,
       reason: editReason,

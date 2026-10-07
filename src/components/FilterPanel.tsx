@@ -561,7 +561,15 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               <input
                 type="checkbox"
                 id="show_ignored_checkbox"
-                checked={Boolean(filters.showIgnoredOrders)}
+                // П5.b: проігноровані замовлення — про клієнтів; у представленнях об'єктів (об'єднання, корпорація, РСП,
+                // склад, маршрут) режим недоступний
+                disabled={!(filters.filterBy === 'client_code' || filters.filterBy === 'client_name')}
+                title={
+                  filters.filterBy === 'client_code' || filters.filterBy === 'client_name'
+                    ? 'Незаблоковані клієнти, у яких у буфері є проігноровані замовлення'
+                    : 'Доступно у представленні клієнтів («Код клієнта» або «Назва клієнта»)'
+                }
+                checked={Boolean(filters.showIgnoredOrders) && (filters.filterBy === 'client_code' || filters.filterBy === 'client_name')}
                 onChange={(e) => {
                   const isChecked = e.target.checked;
                   onFilterChange({

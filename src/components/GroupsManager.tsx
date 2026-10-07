@@ -40,10 +40,21 @@ interface GroupsManagerProps {
 }
 
 /** Склад групи можна змінювати, поки блокування групи не почалось. */
+// Склад редагується, поки блокування групи не почалось, і знову — після кінця її періоду
 export const isGroupEditable = (g: ObjectGroup, now: Date = new Date()): boolean => {
   if (g.lastAction !== 'lock' || !g.lockFrom) return true;
   const from = parseDateStringToMs(g.lockFrom);
-  return from === null ? false : now.getTime() < from;
+  const to = g.lockTo ? parseDateStringToMs(g.lockTo) : null;
+  if (from === null) return false;
+  if (now.getTime() < from) return true;
+  return to !== null && now.getTime() >= to;
+};
+
+// Блокування групи заплановане і ще не почалось — зміна складу додає / знімає заплановані блокування
+export const isGroupScheduled = (g: ObjectGroup, now: Date = new Date()): boolean => {
+  if (g.lastAction !== 'lock' || !g.lockFrom) return false;
+  const from = parseDateStringToMs(g.lockFrom);
+  return from !== null && now.getTime() < from;
 };
 
 export const groupStatus = (g: ObjectGroup, memberState: (id: number, groupName?: string) => MemberState): string => {
@@ -98,7 +109,8 @@ export const GroupsManager: React.FC<GroupsManagerProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
 
   const openGroup = groups.find((g) => g.id === openGroupId) || null;
-  const editable = openGroup ? isGroupEditable(openGroup) : false;
+  // склад редагується до початку і після кінця блокування групи, а також коли блокувань цієї групи вже немає
+  const editable = openGroup ? isGroupEditable(openGroup) || groupStatus(openGroup, memberState) === 'Ні' : false;
   const nameOf = (id: number) => catalog.find((c) => c.id === id);
   const singleCol = catalog.length > 0 && catalog.every((c) => c.code === c.name); // маршрути: код = назва
 
@@ -240,7 +252,7 @@ export const GroupsManager: React.FC<GroupsManagerProps> = ({
                       Блокування групи вже почалось ({openGroup.lockFrom}) — склад не редагується. Доступні перегляд і експорт.
                     </div>
                   )}
-                  {editable && openGroup.lastAction === 'lock' && (
+                  {editable && isGroupScheduled(openGroup) && (
                     <div style={{ padding: '6px 10px', marginBottom: 10, fontSize: 12, backgroundColor: '#d9edf7', border: '1px solid #bce8f1', color: '#31708f' }}>
                       Для групи заплановано блокування з {openGroup.lockFrom}. Додані об'єкти отримають це блокування, прибрані — втратять його.
                     </div>

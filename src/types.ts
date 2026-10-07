@@ -135,6 +135,10 @@ export interface EntityRegistryRow {
   isBlocked: boolean;
   isScheduled?: boolean;
   isFuture?: boolean; // Ф2: є блокування з початком у майбутньому
+  futureStart?: string; // період найближчого запланованого запису (режим запланованих)
+  futureEnd?: string;
+  futureReason?: string; // причина запланованого запису, якщо він інший, ніж показаний (діючий)
+  futureGroup?: string; // група запланованого запису
   scheduledTime?: string;
   startDate?: string;
   endDate?: string;

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
+import { usePersistentState } from '../utils/usePersistentState';
 import { QueueOrder, QueueColumnFilters, ClientRecord } from '../types';
 import { UNIONS_DATA, CORPORATIONS_DATA } from '../data/mockData';
 
@@ -32,16 +33,16 @@ export const QueueOrdersPage: React.FC<QueueOrdersPageProps> = ({
   }, [orders]);
 
   // Top filter states
-  const [filterClient, setFilterClient] = useState<string>('');
-  const [filterUnion, setFilterUnion] = useState<string>('');
-  const [filterCorp, setFilterCorp] = useState<string>('all');
-  const [filterDateFrom, setFilterDateFrom] = useState<string>('');
-  const [filterDateTo, setFilterDateTo] = useState<string>('');
+  const [filterClient, setFilterClient] = usePersistentState<string>('buf:client', '');
+  const [filterUnion, setFilterUnion] = usePersistentState<string>('buf:union', '');
+  const [filterCorp, setFilterCorp] = usePersistentState<string>('buf:corp', 'all');
+  const [filterDateFrom, setFilterDateFrom] = usePersistentState<string>('buf:from', '');
+  const [filterDateTo, setFilterDateTo] = usePersistentState<string>('buf:to', '');
 
   // Table pagination and selection
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const [pageSize, setPageSize] = useState<number>(10);
+  const [currentPage, setCurrentPage] = usePersistentState<number>('buf:page', 1);
+  const [pageSize, setPageSize] = usePersistentState<number>('buf:size', 10);
 
   // File Preview Modal state
   const [previewFileOrder, setPreviewFileOrder] = useState<QueueOrder | null>(null);
@@ -50,7 +51,7 @@ export const QueueOrdersPage: React.FC<QueueOrdersPageProps> = ({
   const [showDatesSummary, setShowDatesSummary] = useState<boolean>(false);
 
   // Column inline filters
-  const [columnFilters, setColumnFilters] = useState<QueueColumnFilters>({
+  const [columnFilters, setColumnFilters] = usePersistentState<QueueColumnFilters>('buf:cols', {
     dateReceived: '',
     clOrderNo: '',
     msgId: '',
@@ -69,16 +70,15 @@ export const QueueOrdersPage: React.FC<QueueOrdersPageProps> = ({
 
   // If initialClientFilter is passed (drill-down from registry)
   useEffect(() => {
+    // Перехід з реєстру (клік по кількості або «Ігнор»): фільтр — тільки цей клієнт (+ ознака ігнорування);
+    // збережені раніше фільтри об'єднання / корпорації / ігнору скидаються, щоб не ховати замовлення клієнта
     if (initialClientFilter) {
       setFilterClient(initialClientFilter.clCode);
-      if (initialClientFilter.unionName) {
-        setFilterUnion(initialClientFilter.unionName);
-      }
-      if (initialClientFilter.corpCode) {
-        setFilterCorp(initialClientFilter.corpCode);
-      }
-    }
-    if (initialShowIgnoredOnly) {
+      setFilterUnion('');
+      setFilterCorp('all');
+      setCurrentPage(1);
+      setColumnFilters((prev) => ({ ...prev, pending: initialShowIgnoredOnly ? 'Так' : '' }));
+    } else if (initialShowIgnoredOnly) {
       setColumnFilters((prev) => ({ ...prev, pending: 'Так' }));
     }
   }, [initialClientFilter, initialShowIgnoredOnly]);

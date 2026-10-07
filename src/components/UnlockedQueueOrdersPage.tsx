@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
+import { usePersistentState } from '../utils/usePersistentState';
 import { UnlockedQueueOrder, ProcessingStatus } from '../types';
 
 interface UnlockedQueueOrdersPageProps {
@@ -11,21 +12,21 @@ export const UnlockedQueueOrdersPage: React.FC<UnlockedQueueOrdersPageProps> = (
   // В5: ширина колонок змінюється перетягуванням межі заголовка
   const gridRef = useGridColumns();
   // Top filter states
-  const [clientSearch, setClientSearch] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [unlockDateFilter, setUnlockDateFilter] = useState<string>('');
-  const [reasonFilter, setReasonFilter] = useState<string>('all');
+  const [clientSearch, setClientSearch] = usePersistentState<string>('unl:client', '');
+  const [statusFilter, setStatusFilter] = usePersistentState<string>('unl:status', 'all');
+  const [unlockDateFilter, setUnlockDateFilter] = usePersistentState<string>('unl:date', '');
+  const [reasonFilter, setReasonFilter] = usePersistentState<string>('unl:reason', 'all');
 
   // Sorting state
-  const [sortField, setSortField] = useState<keyof UnlockedQueueOrder>('id');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortField, setSortField] = usePersistentState<keyof UnlockedQueueOrder>('unl:sort', 'id');
+  const [sortDirection, setSortDirection] = usePersistentState<'asc' | 'desc'>('unl:dir', 'desc');
 
   // Pagination state
-  const [currentPage, setCurrentPage] = useState<number>(1);
-  const [pageSize, setPageSize] = useState<number>(15);
+  const [currentPage, setCurrentPage] = usePersistentState<number>('unl:page', 1);
+  const [pageSize, setPageSize] = usePersistentState<number>('unl:size', 15);
 
   // Column inline filter states
-  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({
+  const [columnFilters, setColumnFilters] = usePersistentState<Record<string, string>>('unl:cols', {
     id: '',
     dateReceived: '',
     clientCode: '',

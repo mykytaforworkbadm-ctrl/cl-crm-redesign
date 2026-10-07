@@ -253,6 +253,54 @@ export function pickPrimaryLock<T extends { startDate?: string; endDate?: string
   return future[0] || live[0];
 }
 
+/**
+ * Перевірка періоду перед збереженням: «по» пізніше за «з» і ще не минула.
+ * Повертає текст помилки або '' (усі вікна введення періоду: клієнт, об'єкт, масова дія, редагування в реєстрі об'єктів).
+ */
+export function validatePeriod(startDate?: string, endDate?: string, now: Date = new Date()): string {
+  const s = parseDateStringToMs(startDate);
+  const e = parseDateStringToMs(endDate);
+  if (s !== null && e !== null && e <= s) return 'Дата «по» має бути пізніше за дату «з».';
+  if (e !== null && e <= now.getTime()) return 'Дата «по» вже минула — таке блокування не діяло б. Вкажіть дату в майбутньому.';
+  return '';
+}
+
+/** Найближчий запланований (ще не розпочатий) запис серед блокувань об'єкта. */
+export function pickFutureLock<T extends { startDate?: string; endDate?: string; isScheduled?: boolean }>(
+  locks: T[],
+  now: Date = new Date()
+): T | undefined {
+  return locks
+    .filter((l) => computeLockTimingState(l, now).isFuture)
+    .sort((a, b) => (parseDateStringToMs(a.startDate) ?? 0) - (parseDateStringToMs(b.startDate) ?? 0))[0];
+}
+
+/**
+ * Перетин двох періодів (без «з» — від зараз, без «по» — безстроково). Доповнення №1, розд. 2: на один об'єкт
+ * кілька записів допускаються, тільки якщо їх періоди не перетинаються.
+ */
+export function periodsOverlap(aStart?: string, aEnd?: string, bStart?: string, bEnd?: string, now: Date = new Date()): boolean {
+  const as = parseDateStringToMs(aStart) ?? now.getTime();
+  const ae = parseDateStringToMs(aEnd) ?? Infinity;
+  const bs = parseDateStringToMs(bStart) ?? now.getTime();
+  const be = parseDateStringToMs(bEnd) ?? Infinity;
+  return Math.max(as, bs) < Math.min(ae, be);
+}
+
+/** Текст помилки, якщо новий період перетинається з іншим (не редагованим) записом того самого об'єкта. */
+export function overlapMessage(
+  others: { reason: string; startDate?: string; endDate?: string }[],
+  start?: string,
+  end?: string,
+  now: Date = new Date()
+): string {
+  const hit = others.find((o) => !computeLockTimingState(o, now).isExpired && periodsOverlap(start, end, o.startDate, o.endDate, now));
+  if (!hit) return '';
+  const s = formatToDisplayDateTime(hit.startDate) || 'негайно';
+  const e = formatToDisplayDateTime(hit.endDate) || 'безстроково';
+  return `Період перетинається з іншим блокуванням цього об'єкта: «${hit.reason}» з ${s} по ${e}. Один об'єкт — одне блокування на період; спершу змініть або зніміть те блокування.`;
+}
+
 export function recomputeClientLocks(
   client: ClientRecord,
   activeObjectLocks: ObjectLockRecord[],

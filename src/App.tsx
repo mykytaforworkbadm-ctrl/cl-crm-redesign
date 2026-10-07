@@ -40,7 +40,7 @@ import {
 } from './types';
 import { HistoryModal } from './components/HistoryModal';
 import { buildHistorySeed } from './data/historySeed';
-import { computeLockTimingState, recomputeClientLocks, formatToDisplayDateTime, pickPrimaryLock } from './utils/lockTiming';
+import { computeLockTimingState, recomputeClientLocks, formatToDisplayDateTime, pickPrimaryLock, pickFutureLock, parseDateStringToMs, overlapMessage } from './utils/lockTiming';
 
 export default function App() {
   const [currentLang, setCurrentLang] = useState<'UA' | 'RU'>('UA');
@@ -204,15 +204,7 @@ export default function App() {
   const [isMassActionOpen, setIsMassActionOpen] = useState<boolean>(false);
   const [massActionResultMessage, setMassActionResultMessage] = useState<string | null>(null);
 
-  // Auto-dismiss mass action result alert after 5 seconds
-  useEffect(() => {
-    if (massActionResultMessage) {
-      const timer = setTimeout(() => {
-        setMassActionResultMessage(null);
-      }, 6000);
-      return () => clearTimeout(timer);
-    }
-  }, [massActionResultMessage]);
+  // Повідомлення про результат масової дії лишається до закриття (×) або наступної дії — як повідомлення імпорту (К 05.10)
 
   // Refs to always access fresh state in scheduler & filter callbacks
   const objectLocksRef = React.useRef(objectLocks);
@@ -481,6 +473,15 @@ export default function App() {
     actor: 'Обновление' | 'Планувальник' = 'Планувальник'
   ) => {
     setCurrentTime(now);
+
+    // Перехід за часом, що настав до дії користувача (між щохвилинними перевірками), фіксується як «Планувальник»,
+    // а не приписується користувачу: спершу прогін за часом по стану до дії, потім — сама дія
+    if (actor === 'Обновление' && prevSnapshotRef.current) {
+      const pl = objectLocksRef.current.filter((l) => !computeLockTimingState(l, now).isExpired);
+      const pc = allClientsRef.current.map((c) => recomputeClientLocks(c, pl, now));
+      logHistoryDiff(buildSnapshot(pl, pc, now), now, 'Планувальник');
+      trackUnlocks(pc, pl, now, 'Планувальник');
+    }
 
     // 1. Purge expired object locks: "Запис зникає зі списку запланованих і з реєстру блокувань об'єктів"
     const validLocks = locksList.filter((l) => !computeLockTimingState(l, now).isExpired);
@@ -760,13 +761,18 @@ export default function App() {
 
   // Update Scheduled Lock from Objects Page (Requirement 2.8)
   const handleUpdateObjectLock = (updatedLock: ObjectLockRecord) => {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
     const normalized: ObjectLockRecord = {
       ...updatedLock,
       startDate: formatToDisplayDateTime(updatedLock.startDate) || undefined,
-      endDate: formatToDisplayDateTime(updatedLock.endDate) || undefined
+      endDate: formatToDisplayDateTime(updatedLock.endDate) || undefined,
+      // редагування — це зміна: оновлюються «Дата змін» і «Змінив» (і запис EDIT_DATE в історії)
+      lockDate: `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
+      lockedBy: 'Дубінін Микита Валерійович'
     };
     const nextLocks = objectLocksRef.current.map((l) => (l.id === normalized.id ? normalized : l));
-    recalculateStatusesWith(nextLocks, allClientsRef.current, new Date(), 'Обновление');
+    recalculateStatusesWith(nextLocks, allClientsRef.current, now, 'Обновление');
   };
 
   // Mass Action Handler
@@ -792,40 +798,48 @@ export default function App() {
 
     if (isLocking) {
       const lockedCount = selectedIds.length;
-      let msg = `Заблоковано ${lockedCount} об'єктів`;
+      const startMs = savedStartDate ? parseDateStringToMs(savedStartDate) : null;
+      const inFuture = startMs !== null && startMs > now.getTime();
+      let msg = inFuture
+        ? `Заплановано блокування ${lockedCount} об'єктів з ${savedStartDate}`
+        : `Заблоковано ${lockedCount} об'єктів`;
+      if (groupName) msg += ` (група «${groupName}»)`;
       if (conflictCount > 0) {
         msg += `, ${conflictCount} пропущено через наявні блокування`;
       }
       setMassActionResultMessage(msg);
     } else {
-      // Unlocking: determine how many actually had active locks
+      // Розблокування: рахуємо тільки об'єкти, з яких справді знімається запис блокування
+      // (для клієнта — власне блокування; у режимі групи — тільки блокування цієї групи)
       let activeUnlockedCount = 0;
       let notLockedCount = 0;
 
       if (entityType === 'clients') {
         selectedIds.forEach((id) => {
           const c = allClientsRef.current.find((item) => item.id === Number(id));
-          if (c && (c.isBlocked || c.isScheduled)) {
-            activeUnlockedCount++;
-          } else {
-            notLockedCount++;
-          }
+          const has = (c?.lockDetails || []).some(
+            (d) => d.source === 'Клієнт' && (!groupName || d.groupName === groupName) && !computeLockTimingState(d, now).isExpired
+          );
+          if (has) activeUnlockedCount++;
+          else notLockedCount++;
         });
       } else {
         const targetType = entityType === 'routes' ? 'Маршрут' : entityType === 'rsps' ? 'РСП' : 'Склад';
         selectedIds.forEach((id) => {
-          const l = objectLocksRef.current.find((item) => item.targetType === targetType && item.targetCode === String(id));
-          if (l) {
-            activeUnlockedCount++;
-          } else {
-            notLockedCount++;
-          }
+          const has = objectLocksRef.current.some(
+            (item) => item.targetType === targetType && item.targetCode === String(id) && (!groupName || item.groupName === groupName)
+          );
+          if (has) activeUnlockedCount++;
+          else notLockedCount++;
         });
       }
 
       let msg = `Розблоковано ${activeUnlockedCount} об'єктів`;
+      if (groupName) msg += ` (блокування групи «${groupName}»)`;
       if (notLockedCount > 0) {
-        msg += `, ще ${notLockedCount} не мали активного блокування`;
+        msg += groupName
+          ? `, ще ${notLockedCount} не мали блокування цієї групи`
+          : `, ще ${notLockedCount} не мали власного блокування`;
       }
       setMassActionResultMessage(msg);
     }
@@ -922,7 +936,7 @@ export default function App() {
   // Кількість замовлень, сума, позиції, ургентаж і ігнор у реєстрі рахуються із замовлень у буфері —
   // одне джерело даних: реєстр і вікно буфера клієнта показують однакові цифри, а зміна ігнору в буфері
   // одразу видна в колонці «Ігнор».
-  const clientsView: ClientRecord[] = useMemo(() => {
+  const bufferStats = useMemo(() => {
     const stats = new Map<string, { n: number; sum: number; rows: number; urgent: number; ignored: number }>();
     orders.forEach((o) => {
       const st = stats.get(o.clientCode) || { n: 0, sum: 0, rows: 0, urgent: 0, ignored: 0 };
@@ -933,23 +947,28 @@ export default function App() {
       if (o.pending === 'Так') st.ignored += 1;
       stats.set(o.clientCode, st);
     });
-    return clients.map((c) => {
-      const st = stats.get(c.clCode);
-      if (!st) {
-        return { ...c, countOrders: '', sumAllOrders: '', countRowsAllOrders: '', countUrgent: '', countIgnored: '' };
-      }
-      return {
-        ...c,
-        countOrders: st.n,
-        sumAllOrders: st.sum
-          .toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-          .replace(/\u00A0/g, ' '),
-        countRowsAllOrders: st.rows,
-        countUrgent: st.urgent,
-        countIgnored: st.ignored
-      };
-    });
-  }, [clients, orders]);
+    return stats;
+  }, [orders]);
+  const withBufferStats = (c: ClientRecord): ClientRecord => {
+    const st = bufferStats.get(c.clCode);
+    if (!st) {
+      return { ...c, countOrders: '', sumAllOrders: '', countRowsAllOrders: '', countUrgent: '', countIgnored: '' };
+    }
+    return {
+      ...c,
+      countOrders: st.n,
+      sumAllOrders: st.sum
+        .toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        .replace(/\u00A0/g, ' '),
+      countRowsAllOrders: st.rows,
+      countUrgent: st.urgent,
+      countIgnored: st.ignored
+    };
+  };
+  // реєстр клієнтів — з урахуванням фільтра головної сторінки
+  const clientsView: ClientRecord[] = useMemo(() => clients.map(withBufferStats), [clients, bufferStats]);
+  // усі клієнти — для «Масова дія» і підсумків об'єктів: не залежать від фільтра головної сторінки
+  const allClientsView: ClientRecord[] = useMemo(() => allClients.map(withBufferStats), [allClients, bufferStats]);
 
   // Generate rows for the entity registries (Union, RSP, Warehouse, Route)
   const currentEntityRows: EntityRegistryRow[] = useMemo(() => {
@@ -958,16 +977,16 @@ export default function App() {
       return list
         .filter((u) => (filters.unionId > 0 ? u.value === filters.unionId : true))
         .map((u) => {
-          const lock = pickPrimaryLock<ObjectLockRecord>(
-            objectLocks.filter(
+          const objLocks = objectLocks.filter(
             (l) =>
               l.targetType === 'Об\'єднання' &&
               (l.targetCode === String(u.value) || l.targetName.toLowerCase() === u.label.toLowerCase())
-          ),
-            currentTime
           );
+          const lock = pickPrimaryLock<ObjectLockRecord>(objLocks, currentTime);
+          // запланований запис (може бути другим записом об'єкта поряд із діючим) — для режиму запланованих
+          const futureLock = pickFutureLock<ObjectLockRecord>(objLocks, currentTime);
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
-          const relatedClients = clientsView.filter(
+          const relatedClients = allClientsView.filter(
             (c) => c.unionId === u.value || c.unionName === u.label
           );
           const countOrders = relatedClients.reduce(
@@ -990,7 +1009,11 @@ export default function App() {
             name: u.label,
             isBlocked: timing ? timing.isBlocked : false,
             isScheduled: timing ? timing.isScheduled : false,
-            isFuture: timing ? timing.isFuture : false,
+            isFuture: Boolean(futureLock),
+            futureStart: futureLock?.startDate ? formatToDisplayDateTime(futureLock.startDate) : undefined,
+            futureEnd: futureLock?.endDate ? formatToDisplayDateTime(futureLock.endDate) : undefined,
+            futureReason: futureLock && futureLock !== lock ? futureLock.reason : undefined,
+            futureGroup: futureLock && futureLock !== lock ? futureLock.groupName : undefined,
             startDate: lock?.startDate ? formatToDisplayDateTime(lock.startDate) : undefined,
             endDate: lock?.endDate ? formatToDisplayDateTime(lock.endDate) : undefined,
             editDate: lock ? lock.lockDate : '',
@@ -1013,16 +1036,16 @@ export default function App() {
       return list
         .filter((c) => (filters.corpCode && filters.corpCode !== 'all' ? c.value === filters.corpCode || c.label === filters.corpCode : true))
         .map((c) => {
-          const lock = pickPrimaryLock<ObjectLockRecord>(
-            objectLocks.filter(
+          const objLocks = objectLocks.filter(
             (l) =>
               l.targetType === 'Корпорація' &&
               (l.targetCode === c.value || l.targetName.toLowerCase() === c.label.toLowerCase())
-          ),
-            currentTime
           );
+          const lock = pickPrimaryLock<ObjectLockRecord>(objLocks, currentTime);
+          // запланований запис (може бути другим записом об'єкта поряд із діючим) — для режиму запланованих
+          const futureLock = pickFutureLock<ObjectLockRecord>(objLocks, currentTime);
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
-          const relatedClients = clientsView.filter((cl) => cl.corpCode === c.value || cl.corpName === c.label);
+          const relatedClients = allClientsView.filter((cl) => cl.corpCode === c.value || cl.corpName === c.label);
           const countOrders = relatedClients.reduce(
             (acc, cl) => acc + (cl.countOrders ? Number(cl.countOrders) : 0),
             0
@@ -1043,7 +1066,11 @@ export default function App() {
             name: c.label,
             isBlocked: timing ? timing.isBlocked : false,
             isScheduled: timing ? timing.isScheduled : false,
-            isFuture: timing ? timing.isFuture : false,
+            isFuture: Boolean(futureLock),
+            futureStart: futureLock?.startDate ? formatToDisplayDateTime(futureLock.startDate) : undefined,
+            futureEnd: futureLock?.endDate ? formatToDisplayDateTime(futureLock.endDate) : undefined,
+            futureReason: futureLock && futureLock !== lock ? futureLock.reason : undefined,
+            futureGroup: futureLock && futureLock !== lock ? futureLock.groupName : undefined,
             startDate: lock?.startDate ? formatToDisplayDateTime(lock.startDate) : undefined,
             endDate: lock?.endDate ? formatToDisplayDateTime(lock.endDate) : undefined,
             editDate: lock ? lock.lockDate : '',
@@ -1065,16 +1092,16 @@ export default function App() {
       return list
         .filter((r) => (filters.rspId > 0 ? r.value === filters.rspId : true))
         .map((r) => {
-          const lock = pickPrimaryLock<ObjectLockRecord>(
-            objectLocks.filter(
+          const objLocks = objectLocks.filter(
             (l) =>
               l.targetType === 'РСП' &&
               (l.targetCode === String(r.value) || l.targetName.toLowerCase() === r.label.toLowerCase())
-          ),
-            currentTime
           );
+          const lock = pickPrimaryLock<ObjectLockRecord>(objLocks, currentTime);
+          // запланований запис (може бути другим записом об'єкта поряд із діючим) — для режиму запланованих
+          const futureLock = pickFutureLock<ObjectLockRecord>(objLocks, currentTime);
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
-          const relatedClients = clientsView.filter(
+          const relatedClients = allClientsView.filter(
             (c) => c.rspId === r.value || c.rspName === r.label
           );
           const countOrders = relatedClients.reduce(
@@ -1097,7 +1124,11 @@ export default function App() {
             name: r.label,
             isBlocked: timing ? timing.isBlocked : false,
             isScheduled: timing ? timing.isScheduled : false,
-            isFuture: timing ? timing.isFuture : false,
+            isFuture: Boolean(futureLock),
+            futureStart: futureLock?.startDate ? formatToDisplayDateTime(futureLock.startDate) : undefined,
+            futureEnd: futureLock?.endDate ? formatToDisplayDateTime(futureLock.endDate) : undefined,
+            futureReason: futureLock && futureLock !== lock ? futureLock.reason : undefined,
+            futureGroup: futureLock && futureLock !== lock ? futureLock.groupName : undefined,
             startDate: lock?.startDate ? formatToDisplayDateTime(lock.startDate) : undefined,
             endDate: lock?.endDate ? formatToDisplayDateTime(lock.endDate) : undefined,
             editDate: lock ? lock.lockDate : '',
@@ -1119,16 +1150,16 @@ export default function App() {
       return list
         .filter((d) => (filters.deptId !== 0 ? d.value === filters.deptId : true))
         .map((d) => {
-          const lock = pickPrimaryLock<ObjectLockRecord>(
-            objectLocks.filter(
+          const objLocks = objectLocks.filter(
             (l) =>
               l.targetType === 'Склад' &&
               (l.targetCode === String(d.value) || l.targetName.toLowerCase() === d.label.toLowerCase())
-          ),
-            currentTime
           );
+          const lock = pickPrimaryLock<ObjectLockRecord>(objLocks, currentTime);
+          // запланований запис (може бути другим записом об'єкта поряд із діючим) — для режиму запланованих
+          const futureLock = pickFutureLock<ObjectLockRecord>(objLocks, currentTime);
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
-          const relatedClients = clientsView.filter(
+          const relatedClients = allClientsView.filter(
             (c) => c.deptId === d.value || c.deptName === d.label
           );
           const countOrders = relatedClients.reduce(
@@ -1151,7 +1182,11 @@ export default function App() {
             name: d.label,
             isBlocked: timing ? timing.isBlocked : false,
             isScheduled: timing ? timing.isScheduled : false,
-            isFuture: timing ? timing.isFuture : false,
+            isFuture: Boolean(futureLock),
+            futureStart: futureLock?.startDate ? formatToDisplayDateTime(futureLock.startDate) : undefined,
+            futureEnd: futureLock?.endDate ? formatToDisplayDateTime(futureLock.endDate) : undefined,
+            futureReason: futureLock && futureLock !== lock ? futureLock.reason : undefined,
+            futureGroup: futureLock && futureLock !== lock ? futureLock.groupName : undefined,
             startDate: lock?.startDate ? formatToDisplayDateTime(lock.startDate) : undefined,
             endDate: lock?.endDate ? formatToDisplayDateTime(lock.endDate) : undefined,
             editDate: lock ? lock.lockDate : '',
@@ -1173,16 +1208,16 @@ export default function App() {
       return list
         .filter((rt) => (filters.routeId > 0 ? rt.value === filters.routeId : true))
         .map((rt) => {
-          const lock = pickPrimaryLock<ObjectLockRecord>(
-            objectLocks.filter(
+          const objLocks = objectLocks.filter(
             (l) =>
               l.targetType === 'Маршрут' &&
               (l.targetCode === String(rt.value) || l.targetName.toLowerCase() === rt.label.toLowerCase())
-          ),
-            currentTime
           );
+          const lock = pickPrimaryLock<ObjectLockRecord>(objLocks, currentTime);
+          // запланований запис (може бути другим записом об'єкта поряд із діючим) — для режиму запланованих
+          const futureLock = pickFutureLock<ObjectLockRecord>(objLocks, currentTime);
           const timing = lock ? computeLockTimingState(lock, currentTime) : null;
-          const relatedClients = clientsView.filter(
+          const relatedClients = allClientsView.filter(
             (c) => c.routeId === rt.value || c.routeName === rt.label
           );
           const countOrders = relatedClients.reduce(
@@ -1205,7 +1240,11 @@ export default function App() {
             name: rt.label,
             isBlocked: timing ? timing.isBlocked : false,
             isScheduled: timing ? timing.isScheduled : false,
-            isFuture: timing ? timing.isFuture : false,
+            isFuture: Boolean(futureLock),
+            futureStart: futureLock?.startDate ? formatToDisplayDateTime(futureLock.startDate) : undefined,
+            futureEnd: futureLock?.endDate ? formatToDisplayDateTime(futureLock.endDate) : undefined,
+            futureReason: futureLock && futureLock !== lock ? futureLock.reason : undefined,
+            futureGroup: futureLock && futureLock !== lock ? futureLock.groupName : undefined,
             startDate: lock?.startDate ? formatToDisplayDateTime(lock.startDate) : undefined,
             endDate: lock?.endDate ? formatToDisplayDateTime(lock.endDate) : undefined,
             editDate: lock ? lock.lockDate : '',
@@ -1223,7 +1262,41 @@ export default function App() {
     }
 
     return [];
-  }, [filters.filterBy, filters.unionId, filters.corpCode, filters.rspId, filters.deptId, filters.routeId, objectLocks, clientsView, currentTime]);
+  }, [filters.filterBy, filters.unionId, filters.corpCode, filters.rspId, filters.deptId, filters.routeId, objectLocks, allClientsView, currentTime]);
+
+  // Сповіщення про результат масової дії / збереження — на головній і на сторінці «Блокування об'єктів»
+  const resultBanner = massActionResultMessage ? (
+              <div
+                className="alert alert-info alert-dismissible"
+                style={{
+                  marginBottom: 12,
+                  padding: '10px 15px',
+                  fontSize: 13,
+                  fontWeight: 500,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  backgroundColor: '#d9edf7',
+                  borderColor: '#bce8f1',
+                  color: '#31708f',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.08)'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span className="glyphicon glyphicon-info-sign" style={{ fontSize: 16 }}></span>
+                  <span>{massActionResultMessage}</span>
+                </div>
+                <button
+                  type="button"
+                  className="close"
+                  style={{ fontSize: 18, color: '#31708f', opacity: 0.8, textShadow: 'none' }}
+                  onClick={() => setMassActionResultMessage(null)}
+                  title="Закрити сповіщення"
+                >
+                  ×
+                </button>
+              </div>
+            ) : null;
 
   return (
     <div className="crm-app" style={{ minHeight: '100vh', backgroundColor: '#fff' }}>
@@ -1264,39 +1337,7 @@ export default function App() {
               </h2>
             </div>
 
-            {/* Сповіщення про результат масової дії */}
-            {massActionResultMessage && (
-              <div
-                className="alert alert-info alert-dismissible"
-                style={{
-                  marginBottom: 12,
-                  padding: '10px 15px',
-                  fontSize: 13,
-                  fontWeight: 500,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  backgroundColor: '#d9edf7',
-                  borderColor: '#bce8f1',
-                  color: '#31708f',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.08)'
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className="glyphicon glyphicon-info-sign" style={{ fontSize: 16 }}></span>
-                  <span>{massActionResultMessage}</span>
-                </div>
-                <button
-                  type="button"
-                  className="close"
-                  style={{ fontSize: 18, color: '#31708f', opacity: 0.8, textShadow: 'none' }}
-                  onClick={() => setMassActionResultMessage(null)}
-                  title="Закрити сповіщення"
-                >
-                  ×
-                </button>
-              </div>
-            )}
+            {resultBanner}
 
             {/* Панель фільтрів із 7 радіокнопками та кнопками керування */}
             <FilterPanel
@@ -1341,6 +1382,7 @@ export default function App() {
               filters.filterBy === 'dept' ||
               filters.filterBy === 'route') && (
               <EntityRegistryTable
+                key={filters.filterBy}
                 entityType={filters.filterBy}
                 rows={currentEntityRows}
                 onOpenChangeLock={handleOpenChangeObjectLock}
@@ -1356,6 +1398,8 @@ export default function App() {
         {currentPage === 'buffer' && (
           <QueueOrdersPage
             orders={orders}
+            // зміни ігнору / видалення на сторінці буфера — у спільний буфер (колонки «Ігнор», «Кількість замовлень» у реєстрі)
+            onUpdateOrders={(updated) => setOrders(updated)}
             initialClientFilter={drilldownClient}
             initialShowIgnoredOnly={drilldownShowIgnoredOnly}
             returnClient={returnClientContext}
@@ -1378,6 +1422,7 @@ export default function App() {
         )}
 
         {/* VIEW 3: Блокування об'єктів (Маршрути, РСП, Склади, Об'єднання) */}
+        {currentPage === 'objects' && <div style={{ padding: '0 15px' }}>{resultBanner}</div>}
         {currentPage === 'objects' && (
           <ObjectLocksPage
             objectLocks={objectLocks}
@@ -1450,16 +1495,25 @@ export default function App() {
         row={modalObjectRow}
         onClose={() => setIsChangeObjectLockOpen(false)}
         onSave={handleSaveObjectLock}
+        checkOverlap={(row, start, end) => {
+          // інші записи цього об'єкта, крім того, що редагується у вікні (основного)
+          const list = objectLocksRef.current.filter(
+            (l) => l.targetType === row.type && (l.targetCode === String(row.code) || l.targetName === row.name)
+          );
+          const primary = pickPrimaryLock<ObjectLockRecord>(list, new Date());
+          return overlapMessage(list.filter((l) => l !== primary), start, end);
+        }}
       />
 
       {/* Модальне вікно: Масова дія (4 вкладки сутностей, вибір, дати, блокування) */}
       <MassActionModal
         isOpen={isMassActionOpen}
         onClose={() => setIsMassActionOpen(false)}
-        clients={clientsView}
+        clients={allClientsView}
         objectLocks={objectLocks}
         groups={groups}
         onGroupsChange={setGroups}
+        onResultMessage={(m) => setMassActionResultMessage(m)}
         onApplyMassAction={handleApplyMassAction}
       />
     </div>

@@ -835,7 +835,7 @@ export const INITIAL_OBJECT_LOCKS: ObjectLockRecord[] = [
     targetType: 'Склад',
     targetCode: '-37',
     targetName: 'Паникахи Днепропетровск Сводный',
-    reason: 'Технічне обслуговування конвеєра',
+    reason: 'Технічне обслуговування', // причина з довідника ручних причин
     lockDate: '18.08.2026 07:00:00',
     lockedBy: 'Адміністратор БД',
     isScheduled: false

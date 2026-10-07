@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { useGridColumns } from '../utils/useGridColumns';
 import { DateTimeInput } from './DateTimeInput';
 import { ClientRecord, LockDetail, ObjectLockRecord, ObjectGroup, GroupKind } from '../types';
-import { GroupsManager, CatalogItem, MemberState, isGroupEditable } from './GroupsManager';
+import { GroupsManager, CatalogItem, MemberState, isGroupEditable, isGroupScheduled, groupStatus } from './GroupsManager';
 import { UNIONS_DATA, DEPTS_DATA, RSPS_DATA, ROUTES_DATA, CORPORATIONS_DATA, MANUAL_BLOCKING_REASONS } from '../data/mockData';
-import { computeLockTimingState, formatToDisplayDateTime, isShownAsBlocked, pickPrimaryLock } from '../utils/lockTiming';
+import { computeLockTimingState, formatToDisplayDateTime, isShownAsBlocked, pickPrimaryLock, validatePeriod } from '../utils/lockTiming';
 import { readXlsxCodes } from '../utils/readXlsxCodes';
 import { getFutureLockDetail } from './ClientsTable';
 
@@ -15,6 +15,7 @@ interface MassActionModalProps {
   objectLocks?: ObjectLockRecord[];
   groups?: ObjectGroup[]; // Р1
   onGroupsChange?: (groups: ObjectGroup[]) => void;
+  onResultMessage?: (message: string) => void; // підсумкове повідомлення над реєстром
   onApplyMassAction: (
     entityType: 'clients' | 'routes' | 'rsps' | 'depts',
     selectedIds: (number | string)[],
@@ -44,6 +45,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   objectLocks = [],
   groups = [],
   onGroupsChange,
+  onResultMessage,
   onApplyMassAction
 }) => {
   const [activeTab, setActiveTab] = useState<'clients' | 'routes' | 'rsps' | 'depts'>('clients');
@@ -191,7 +193,7 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
         const baseName = importFile.name.replace(/\.xlsx$/i, '').trim() || 'Група';
         const sameName = groups.find((g) => g.kind === activeTab && g.name.toLowerCase() === baseName.toLowerCase());
         const existing = target || sameName || null;
-        if (existing && !isGroupEditable(existing)) {
+        if (existing && !isGroupEditable(existing) && groupStatus(existing, memberStateFor(activeTab)) !== 'Ні') {
           groupNote = `Склад групи «${existing.name}» не змінено: блокування групи вже почалось.`;
         } else if (existing) {
           applyComposition(existing, foundIds); // для запланованої групи — додає / знімає заплановані блокування
@@ -294,13 +296,24 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   const inActiveGroup = (id: number) => !activeGroup || activeGroup.memberIds.includes(id);
   const updateGroups = (next: ObjectGroup[]) => onGroupsChange && onGroupsChange(next);
 
+  // Дія виконується над групою, тільки якщо увімкнено фільтр «Група» і обрано рівно всі об'єкти цієї групи.
+  // Частковий вибір — звичайна масова дія над обраними об'єктами (група не змінюється).
+  const groupActionTarget = (): ObjectGroup | null => {
+    const grp = groups.find((g) => g.id === groupFilter[activeTab] && g.kind === activeTab) || null;
+    if (!grp || grp.memberIds.length === 0) return null;
+    const sel =
+      activeTab === 'clients' ? selectedClientIds : activeTab === 'routes' ? selectedRouteIds : activeTab === 'rsps' ? selectedRspIds : selectedDeptIds;
+    const selSet = new Set(sel.map(Number));
+    return selSet.size === grp.memberIds.length && grp.memberIds.every((id) => selSet.has(id)) ? grp : null;
+  };
+
   // Зміна складу групи (вікно «Склад групи» або «Оновити з файлу» / повторний імпорт файлу з тією ж назвою).
   // Заплановане блокування групи ще не почалось: додані отримують його, прибрані — втрачають (тільки блокування цієї групи)
   const applyComposition = (g: ObjectGroup, memberIds: number[]) => {
     const added = memberIds.filter((id) => !g.memberIds.includes(id));
     const removed = g.memberIds.filter((id) => !memberIds.includes(id));
     updateGroups(groups.map((x) => (x.id === g.id ? { ...x, memberIds, editedAt: nowStamp(), editedBy: CURRENT_USER } : x)));
-    if (g.lastAction === 'lock' && isGroupEditable(g)) {
+    if (isGroupScheduled(g)) {
       // «Замінити наявне блокування» немає: доданий об'єкт з блокуванням, період якого перетинається, блокування групи не отримує
       const overlaps = (id: number) => {
         const list =
@@ -321,6 +334,15 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
         return objectLocks.some((l) => l.targetType === targetTypeOf(g.kind) && l.targetCode === String(id) && l.groupName === g.name);
       });
       if (removedOwn.length) onApplyMassAction(g.kind, removedOwn, 'unlock', '', undefined, undefined, removedOwn.length, 0, g.name);
+      // одне зведене повідомлення про зміну складу (додані, пропущені через перетин, прибрані)
+      if ((added.length || removedOwn.length) && onResultMessage) {
+        const skipped = added.length - addOk.length;
+        onResultMessage(
+          `Склад групи «${g.name}» змінено: заплановане блокування групи отримали ${addOk.length} доданих об'єктів` +
+            (skipped ? `, ${skipped} пропущено через наявні блокування з періодом, що перетинається` : '') +
+            `; знято з ${removedOwn.length} прибраних.`
+        );
+      }
     }
   };
 
@@ -513,6 +535,14 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       return;
     }
 
+    if (action === 'lock') {
+      const err = validatePeriod(startDateTime || undefined, endDateTime || undefined);
+      if (err) {
+        alert(err);
+        return;
+      }
+    }
+
     setPendingAction(action);
 
     // Calculate conflicts for 'lock' action
@@ -636,8 +666,8 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
   const handleConfirmAction = () => {
     // Р1: якщо увімкнено фільтр «Група» і всі об'єкти дії входять у цю групу — дія виконується над групою:
     // блокування позначаються назвою групи, у групі фіксуються статус, період, дата змін і хто змінив
-    const grp = groups.find((g) => g.id === groupFilter[activeTab] && g.kind === activeTab) || null;
-    const asGroup = Boolean(grp && nonConflictedIds.length > 0 && nonConflictedIds.every((id) => grp.memberIds.includes(Number(id))));
+    const grp = groupActionTarget();
+    const asGroup = Boolean(grp && (pendingAction === 'unlock' || nonConflictedIds.length > 0));
     if (grp && asGroup) {
       const pad = (n: number) => String(n).padStart(2, '0');
       const d = new Date();
@@ -668,6 +698,14 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
       conflictedItems.length,
       grp && asGroup ? grp.name : undefined
     );
+    // після застосування вибір і період скидаються, щоб наступне відкриття «Масова дія» не застосувало дію
+    // до тих самих об'єктів повторно (фільтр «Група» лишається)
+    if (activeTab === 'clients') setSelectedClientIds([]);
+    else if (activeTab === 'routes') setSelectedRouteIds([]);
+    else if (activeTab === 'rsps') setSelectedRspIds([]);
+    else setSelectedDeptIds([]);
+    setStartDateTime('');
+    setEndDateTime('');
     setShowConfirmModal(false);
     onClose();
   };
@@ -792,7 +830,9 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                       value={clientCorpFilter}
                       onChange={(e) => setClientCorpFilter(e.target.value)}
                     >
-                      {CORPORATIONS_DATA.map((c) => (
+                      {/* ТЗ 4.3: фільтр корпорації окремо від об'єднання; «Всі корпорації» — без відбору */}
+                      <option value="all">Всі корпорації</option>
+                      {CORPORATIONS_DATA.filter((c) => c.value !== '').map((c) => (
                         <option key={c.value} value={c.value}>{c.label}</option>
                       ))}
                     </select>
@@ -1100,8 +1140,8 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
               {/* Form Controls for Action at Bottom */}
               <div style={{ marginTop: 15, padding: 12, backgroundColor: '#f9f9f9', border: '1px solid #e5e5e5' }}>
                 <div className="row" style={{ marginBottom: 8 }}>
-                  <div className="col-md-2" style={{ fontWeight: 'bold' }}>
-                    Причина:
+                  <div className="col-md-2" style={{ fontWeight: 'bold' }} title="Причина і період застосовуються тільки до блокування; для розблокування не потрібні (Д1 розд. 3)">
+                    Причина (для блокування):
                   </div>
                   <div className="col-md-2" style={{ width: '80%' }}>
                     <select
@@ -1378,6 +1418,20 @@ export const MassActionModal: React.FC<MassActionModalProps> = ({
                         {activeTab === 'clients' ? 'Клієнти' : activeTab === 'routes' ? 'Маршрути' : activeTab === 'rsps' ? 'РСП' : 'Склади'}: {getSelectedCount()} об'єктів
                       </span>
                     </div>
+
+                    {groupActionTarget() && (
+                      <div style={{ marginBottom: 8, display: 'flex' }}>
+                        <span style={{ width: 90, color: '#666', fontWeight: 'bold' }}>Група:</span>
+                        <span style={{ color: '#6f42c1', fontWeight: 'bold' }}>
+                          «{groupActionTarget()?.name}»
+                          {pendingAction === 'unlock' && (
+                            <span style={{ display: 'block', fontWeight: 'normal', color: '#555', fontSize: 12 }}>
+                              Знімаються тільки блокування цієї групи. Інші блокування цих об'єктів лишаються.
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                    )}
 
                     {pendingAction === 'lock' && (
                       <div style={{ marginBottom: 8, display: 'flex' }}>

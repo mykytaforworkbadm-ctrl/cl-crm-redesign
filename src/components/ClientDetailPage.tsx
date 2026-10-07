@@ -4,7 +4,7 @@ import { useGridColumns } from '../utils/useGridColumns';
 import { useDraggableDialog } from '../utils/useDraggableDialog';
 import { ClientRecord, LockDetail, ObjectLockRecord, QueueOrder, QueueColumnFilters } from '../types';
 import { MANUAL_BLOCKING_REASONS, RSPS_DATA, DEPTS_DATA, ROUTES_DATA } from '../data/mockData';
-import { computeLockTimingState, pickPrimaryLock } from '../utils/lockTiming';
+import { computeLockTimingState, pickPrimaryLock, validatePeriod, overlapMessage } from '../utils/lockTiming';
 
 interface ClientDetailPageProps {
   client: ClientRecord;
@@ -94,6 +94,16 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
 
   // Handle Save
   const handleSave = () => {
+    if (isBlocked) {
+      const others = (client.lockDetails || []).filter((d) => d.source === 'Клієнт' && d !== directLock);
+      const err =
+        validatePeriod(startDateTime || undefined, endDateTime || undefined) ||
+        overlapMessage(others, startDateTime || undefined, endDateTime || undefined);
+      if (err) {
+        window.alert(err);
+        return;
+      }
+    }
     // Conflict Alert (порівняння з власним блокуванням клієнта, а не із загальним статусом)
     if (isBlocked && directLock && directLock.reason && reason !== directLock.reason) {
       if (
@@ -130,130 +140,68 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
   };
 
   // Helper to determine status of related hierarchical objects
-  const getObjectStatus = (type: 'Об\'єднання' | 'РСП' | 'Маршрут' | 'Склад') => {
-    let name = '';
-    let isLocked = false;
-    let lockReason = '';
-    let lockDate = '';
-
-    if (type === 'Об\'єднання') {
-      name = client.unionName || 'Не прив\'язано';
-      if (client.unionName) {
-        const found = pickPrimaryLock<ObjectLockRecord>(
-          objectLocks.filter(
-          (o) =>
-            o.targetType === 'Об\'єднання' &&
-            (o.targetName === client.unionName || (client.unionId && o.targetCode === String(client.unionId)))
-        )
-        );
-        if (found) {
-          const timing = computeLockTimingState(found, new Date());
-          if (timing.isActive) {
-            isLocked = true;
-            lockReason = found.reason;
-            lockDate = found.lockDate;
-          }
-        } else {
-          const detail = client.lockDetails?.find((d) => d.source === 'Об\'єднання');
-          if (detail) {
-            const timing = computeLockTimingState(detail, new Date());
-            if (timing.isActive) {
-              isLocked = true;
-              lockReason = detail.reason;
-            }
-          }
-        }
-      }
-    } else if (type === 'РСП') {
-      name = client.rspName || (client.rspId ? RSPS_DATA.find((r) => r.value === client.rspId)?.label || 'Не призначено' : 'Не призначено');
-      if (client.rspName || client.rspId) {
-        const found = pickPrimaryLock<ObjectLockRecord>(
-          objectLocks.filter(
-          (o) =>
-            o.targetType === 'РСП' &&
-            (o.targetName === client.rspName || (client.rspId && o.targetCode === String(client.rspId)))
-        )
-        );
-        if (found) {
-          const timing = computeLockTimingState(found, new Date());
-          if (timing.isActive) {
-            isLocked = true;
-            lockReason = found.reason;
-            lockDate = found.lockDate;
-          }
-        } else {
-          const detail = client.lockDetails?.find((d) => d.source === 'РСП');
-          if (detail) {
-            const timing = computeLockTimingState(detail, new Date());
-            if (timing.isActive) {
-              isLocked = true;
-              lockReason = detail.reason;
-            }
-          }
-        }
-      }
-    } else if (type === 'Маршрут') {
-      name = client.routeName || (client.routeId ? ROUTES_DATA.find((r) => r.value === client.routeId)?.label || 'Не призначено' : 'Не призначено');
-      if (client.routeName || client.routeId) {
-        const found = pickPrimaryLock<ObjectLockRecord>(
-          objectLocks.filter(
-          (o) =>
-            o.targetType === 'Маршрут' &&
-            (o.targetName === client.routeName || (client.routeId && o.targetCode === String(client.routeId)))
-        )
-        );
-        if (found) {
-          const timing = computeLockTimingState(found, new Date());
-          if (timing.isActive) {
-            isLocked = true;
-            lockReason = found.reason;
-            lockDate = found.lockDate;
-          }
-        } else {
-          const detail = client.lockDetails?.find((d) => d.source === 'Маршрут');
-          if (detail) {
-            const timing = computeLockTimingState(detail, new Date());
-            if (timing.isActive) {
-              isLocked = true;
-              lockReason = detail.reason;
-            }
-          }
-        }
-      }
-    } else if (type === 'Склад') {
-      name = client.deptName || (client.deptId ? DEPTS_DATA.find((d) => d.value === client.deptId)?.label || 'Не призначено' : 'Не призначено');
-      if (client.deptName || client.deptId) {
-        const found = pickPrimaryLock<ObjectLockRecord>(
-          objectLocks.filter(
-          (o) =>
-            o.targetType === 'Склад' &&
-            (o.targetName === client.deptName || (client.deptId && o.targetCode === String(client.deptId)))
-        )
-        );
-        if (found) {
-          const timing = computeLockTimingState(found, new Date());
-          if (timing.isActive) {
-            isLocked = true;
-            lockReason = found.reason;
-            lockDate = found.lockDate;
-          }
-        } else {
-          const detail = client.lockDetails?.find((d) => d.source === 'Склад');
-          if (detail) {
-            const timing = computeLockTimingState(detail, new Date());
-            if (timing.isActive) {
-              isLocked = true;
-              lockReason = detail.reason;
-            }
-          }
-        }
-      }
+  // «Інші діючі блокування»: стан кожного пов'язаного об'єкта з блокувань клієнта (каскад уже враховує всі записи
+  // об'єкта): діюче — причина і з якого часу; заплановане — «Заплановано з …» (К 05.10, Р3: також корпорація)
+  type ObjType = 'Об\'єднання' | 'Корпорація' | 'РСП' | 'Маршрут' | 'Склад';
+  const getObjectStatus = (type: ObjType) => {
+    const name =
+      type === 'Об\'єднання'
+        ? client.unionName || 'Не прив\'язано'
+        : type === 'Корпорація'
+        ? client.corpName || 'Не прив\'язано'
+        : type === 'РСП'
+        ? client.rspName || (client.rspId ? RSPS_DATA.find((r) => r.value === client.rspId)?.label || 'Не призначено' : 'Не призначено')
+        : type === 'Маршрут'
+        ? client.routeName || (client.routeId ? ROUTES_DATA.find((r) => r.value === client.routeId)?.label || 'Не призначено' : 'Не призначено')
+        : client.deptName || (client.deptId ? DEPTS_DATA.find((d) => d.value === client.deptId)?.label || 'Не призначено' : 'Не призначено');
+    const now = new Date();
+    const details = (client.lockDetails || []).filter((d) => d.source === type);
+    const active = details.find((d) => computeLockTimingState(d, now).isBlocked);
+    const future = details
+      .filter((d) => computeLockTimingState(d, now).isFuture)
+      .sort((a, b) => (Date.parse(String(formatToInputDateSafe(a.startDate))) || 0) - (Date.parse(String(formatToInputDateSafe(b.startDate))) || 0))[0];
+    let since = '';
+    if (active) {
+      const rec = objectLocks.find(
+        (l) => l.targetType === type && l.reason === active.reason && l.startDate === active.startDate && l.endDate === active.endDate
+      );
+      since = active.startDate || (rec ? rec.lockDate.split(' ')[0] : '');
     }
-
-    return { name, isLocked, lockReason, lockDate };
+    return {
+      name,
+      isLocked: Boolean(active),
+      lockReason: active ? active.reason + (active.groupName ? ` · група «${active.groupName}»` : '') : '',
+      since,
+      futureReason: future ? future.reason + (future.groupName ? ` · група «${future.groupName}»` : '') : '',
+      futureStart: future?.startDate || ''
+    };
   };
+  const formatToInputDateSafe = (s?: string) => {
+    const m = (s || '').match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})/);
+    return m ? `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}` : s || '';
+  };
+  const renderObjectStatus = (st: ReturnType<typeof getObjectStatus>) => (
+    <>
+      {st.isLocked ? (
+        <span style={{ color: '#a94442', fontWeight: 600 }}>
+          🔴 Заблоковано — {st.lockReason}
+          {st.since ? ` (з ${st.since})` : ''}
+        </span>
+      ) : (
+        <span style={{ color: '#777' }}>
+          ⚪ Не заблоковано <span style={{ color: '#999', fontSize: 11 }}>({st.name})</span>
+        </span>
+      )}
+      {st.futureReason && (
+        <span style={{ display: 'block', color: '#8a6d3b', fontSize: 11 }}>
+          ⏱ Заплановано з {st.futureStart} — {st.futureReason}
+        </span>
+      )}
+    </>
+  );
 
   const unionStatus = getObjectStatus('Об\'єднання');
+  const corpStatus = getObjectStatus('Корпорація');
   const rspStatus = getObjectStatus('РСП');
   const routeStatus = getObjectStatus('Маршрут');
   const warehouseStatus = getObjectStatus('Склад');
@@ -764,16 +712,7 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                   >
                     <div style={{ width: '100px', fontWeight: 600, color: '#333' }}>Об'єднання:</div>
                     <div style={{ flex: 1, paddingRight: 10 }}>
-                      {unionStatus.isLocked ? (
-                        <span style={{ color: '#a94442', fontWeight: 600 }}>
-                          🔴 Заблоковано — {unionStatus.lockReason}
-                          {unionStatus.lockDate ? ` (з ${unionStatus.lockDate.split(' ')[0]})` : ''}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#777' }}>
-                          ⚪ Не заблоковано <span style={{ color: '#999', fontSize: 11 }}>({unionStatus.name})</span>
-                        </span>
-                      )}
+                      {renderObjectStatus(unionStatus)}
                     </div>
                     <div>
                       <a
@@ -781,6 +720,34 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                         onClick={(e) => {
                           e.preventDefault();
                           if (onNavigateToObjectLocks) onNavigateToObjectLocks('Об\'єднання', unionStatus.name);
+                        }}
+                        style={{ color: '#337ab7', fontSize: 11, fontWeight: 600, textDecoration: 'none' }}
+                      >
+                        Перейти →
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Р3: Корпорація */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '6px 0',
+                      borderBottom: '1px solid #f0f0f0'
+                    }}
+                  >
+                    <div style={{ width: '100px', fontWeight: 600, color: '#333' }}>Корпорація:</div>
+                    <div style={{ flex: 1, paddingRight: 10 }}>
+                      {renderObjectStatus(corpStatus)}
+                    </div>
+                    <div>
+                      <a
+                        href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (onNavigateToObjectLocks) onNavigateToObjectLocks('Корпорація', corpStatus.name);
                         }}
                         style={{ color: '#337ab7', fontSize: 11, fontWeight: 600, textDecoration: 'none' }}
                       >
@@ -801,16 +768,7 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                   >
                     <div style={{ width: '100px', fontWeight: 600, color: '#333' }}>РСП:</div>
                     <div style={{ flex: 1, paddingRight: 10 }}>
-                      {rspStatus.isLocked ? (
-                        <span style={{ color: '#a94442', fontWeight: 600 }}>
-                          🔴 Заблоковано — {rspStatus.lockReason}
-                          {rspStatus.lockDate ? ` (з ${rspStatus.lockDate.split(' ')[0]})` : ''}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#777' }}>
-                          ⚪ Не заблоковано <span style={{ color: '#999', fontSize: 11 }}>({rspStatus.name})</span>
-                        </span>
-                      )}
+                      {renderObjectStatus(rspStatus)}
                     </div>
                     <div>
                       <a
@@ -838,16 +796,7 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                   >
                     <div style={{ width: '100px', fontWeight: 600, color: '#333' }}>Маршрут:</div>
                     <div style={{ flex: 1, paddingRight: 10 }}>
-                      {routeStatus.isLocked ? (
-                        <span style={{ color: '#a94442', fontWeight: 600 }}>
-                          🔴 Заблоковано — {routeStatus.lockReason}
-                          {routeStatus.lockDate ? ` (з ${routeStatus.lockDate.split(' ')[0]})` : ''}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#777' }}>
-                          ⚪ Не заблоковано <span style={{ color: '#999', fontSize: 11 }}>({routeStatus.name})</span>
-                        </span>
-                      )}
+                      {renderObjectStatus(routeStatus)}
                     </div>
                     <div>
                       <a
@@ -874,16 +823,7 @@ export const ClientDetailPage: React.FC<ClientDetailPageProps> = ({
                   >
                     <div style={{ width: '100px', fontWeight: 600, color: '#333' }}>Склад:</div>
                     <div style={{ flex: 1, paddingRight: 10 }}>
-                      {warehouseStatus.isLocked ? (
-                        <span style={{ color: '#a94442', fontWeight: 600 }}>
-                          🔴 Заблоковано — {warehouseStatus.lockReason}
-                          {warehouseStatus.lockDate ? ` (з ${warehouseStatus.lockDate.split(' ')[0]})` : ''}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#777' }}>
-                          ⚪ Не заблоковано <span style={{ color: '#999', fontSize: 11 }}>({warehouseStatus.name})</span>
-                        </span>
-                      )}
+                      {renderObjectStatus(warehouseStatus)}
                     </div>
                     <div>
                       <a

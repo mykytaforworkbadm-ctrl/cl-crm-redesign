@@ -3,7 +3,7 @@ import { useDraggableDialog } from '../utils/useDraggableDialog';
 import { DateTimeInput } from './DateTimeInput';
 import { EntityRegistryRow, EntityType } from '../types';
 import { MANUAL_BLOCKING_REASONS } from '../data/mockData';
-import { formatToDisplayDateTime } from '../utils/lockTiming';
+import { formatToDisplayDateTime, validatePeriod } from '../utils/lockTiming';
 
 interface ChangeObjectLockModalProps {
   row: EntityRegistryRow | null;
@@ -18,13 +18,16 @@ interface ChangeObjectLockModalProps {
     startDate?: string,
     endDate?: string
   ) => void;
+  // перевірка перетину з іншими записами цього об'єкта (Д1 розд. 2); повертає текст помилки або ''
+  checkOverlap?: (row: EntityRegistryRow, startDate?: string, endDate?: string) => string;
 }
 
 export const ChangeObjectLockModal: React.FC<ChangeObjectLockModalProps> = ({
   row,
   isOpen,
   onClose,
-  onSave
+  onSave,
+  checkOverlap
 }) => {
   const [isBlocked, setIsBlocked] = useState<boolean>(true);
   const [reason, setReason] = useState<string>('Блокування НКЦ');
@@ -63,11 +66,8 @@ export const ChangeObjectLockModal: React.FC<ChangeObjectLockModalProps> = ({
       if (row.reason && (MANUAL_BLOCKING_REASONS as readonly string[]).includes(row.reason)) {
         setReason(row.reason);
       } else {
-        // default manual reason based on entity type
-        if (row.type === 'Склад') setReason('Технічне обслуговування');
-        else if (row.type === 'Маршрут') setReason('Перекриття автошляху');
-        else if (row.type === 'РСП') setReason('Планова інвентаризація');
-        else setReason('Блокування НКЦ');
+        // К 05.10: «НКЦ блокує автоімпорт, як правило, по причині «Блокування НКЦ»»
+        setReason('Блокування НКЦ');
       }
 
       const hasActualPeriod = Boolean((row.startDate && row.startDate.trim()) || (row.endDate && row.endDate.trim()));
@@ -75,7 +75,7 @@ export const ChangeObjectLockModal: React.FC<ChangeObjectLockModalProps> = ({
       setStartDate(formatToInputDate(row.startDate));
       setEndDate(formatToInputDate(row.endDate));
     }
-  }, [row]);
+  }, [row, isOpen]); // при кожному відкритті — поточні значення запису (Д1 розд. 4), без незбережених правок минулого разу
 
   if (!isOpen || !row) return null;
 
@@ -84,6 +84,13 @@ export const ChangeObjectLockModal: React.FC<ChangeObjectLockModalProps> = ({
 
     const formattedStartDate = isBlocked && isScheduled ? formatFromInputDate(startDate) : undefined;
     const formattedEndDate = isBlocked && isScheduled ? formatFromInputDate(endDate) : undefined;
+    const err = isBlocked
+      ? validatePeriod(formattedStartDate, formattedEndDate) || (checkOverlap ? checkOverlap(row, formattedStartDate, formattedEndDate) : '')
+      : '';
+    if (err) {
+      window.alert(err);
+      return;
+    }
 
     onSave(
       row.type,
